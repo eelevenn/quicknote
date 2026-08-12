@@ -75,7 +75,8 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 53. As a QuickNote user, I want `Esc` and the close icon to close only quick capture, so that dismissal is not confused with main-window navigation.
 54. As a QuickNote user, I want an explicit `打开主窗口` action in quick capture, so that I can intentionally transition into the full application workspace.
 55. As a QuickNote user, I want unset time fields to display a neutral dashed empty state, so that browser format hints are not mistaken for saved values.
-56. As a QuickNote user, I want a visible clear icon beside each configured time, so that reminder and due time can be removed independently in one action.
+56. As a QuickNote user, I want a clear icon to appear beside a configured time only while I hover or keyboard-focus its control, so that removal stays available without adding persistent visual noise.
+57. As a QuickNote user, I want setting a due time to populate the reminder whenever the reminder is empty, so that the lightweight default remains predictable without overwriting an independently chosen reminder.
 
 ## Implementation Decisions
 
@@ -88,7 +89,7 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 - `Esc`, clicking outside, and the close icon dismiss quick capture without claiming to navigate anywhere. The quick-capture footer instead offers an explicit `打开主窗口` action that activates and shows the App main window focused on the current note.
 - New-note creation is located at the lower-right of the note collection. It opens an uncommitted draft in the persistent editor on wide layouts and in quick capture on single-column layouts.
 - Reminder precedes due time in both metadata summaries and the time editor; the dialog title follows the same `提醒与截止时间` order.
-- Empty reminder and due controls display `----/--/-- --:--` instead of the browser's locale format hint. A configured control exposes an accessible floating clear icon beside the calendar affordance; clearing one value never clears the other.
+- Empty reminder and due controls display `----/--/-- --:--` instead of the browser's locale format hint. The calendar affordance stays at the far right. A configured control exposes an accessible floating clear icon immediately to its left only on hover or keyboard focus; clearing one value never clears the other.
 - The first quick-capture focus goes to the editor with the caret at the content end. Renders caused by autosave feedback preserve the user's current selection.
 - New-note creation begins as an uncommitted in-memory draft. The draft joins the note collection and becomes current only after non-blank input; closing an untouched draft discards it without trace.
 - Autosave is the only save interaction. The UI exposes transient `正在保存…` and settled `已自动保存` feedback without a save button.
@@ -96,7 +97,7 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 - Archiving removes a note from the home page and clears its future reminder. A temporary undo restores the pre-archive snapshot.
 - Archived notes are browsed in a separate collection. Restoring returns the note to the home page and makes it current.
 - The home page does not repeat its identity across brand, page title and collection controls. The active collection is the default context, while archived notes use a visually secondary text entry with an optional count rather than an equal-weight tab.
-- Due time and reminder belong to the whole note. When a user adds a due time and no reminder exists, the reminder defaults to the same value; later reminder changes remain independent.
+- Due time and reminder belong to the whole note. Whenever the user sets or changes a due time while the reminder is empty, the reminder adopts the same value. An existing reminder is never overwritten, and the user can set, change, or clear it independently.
 - Voice capture is an explicit two-state action. Ending it inserts transcription at the current caret. Closing quick capture always ends the recording state.
 - On widths below the two-column breakpoint, the persistent editor is hidden and quick capture becomes the editing surface, leaving one note-list column without horizontal overflow. The exact production breakpoint remains an implementation detail to tune with the chosen desktop shell.
 - The production direction should start from variant A's explicit list/current-note relationship, combine variant B's compact metadata and keyboard guidance, and borrow variant C's strong current-note hierarchy. None of the throwaway variant code should be promoted directly.

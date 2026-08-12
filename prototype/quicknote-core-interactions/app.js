@@ -608,7 +608,7 @@ function metadataDialogTemplate() {
           <div class="field">
             <label for="due-at">截止时间</label>
             ${datetimeControl({ id: "due-at", name: "dueAt", label: "截止时间", value: note?.dueAt })}
-            <p class="field-hint">首次设置截止时间时，会默认在同一时刻添加提醒。</p>
+            <p class="field-hint">提醒为空时，设置截止时间会同时添加同一时刻的提醒。</p>
           </div>
         </div>
         <footer class="dialog-footer">
@@ -762,7 +762,7 @@ function bindEvents() {
     state.metadataOpen = false;
   });
 
-  // 截止时间首次填写时，提醒输入框显示同值，但仍允许用户独立修改。
+  // 提醒为空时，修改截止时间会同步提醒；已有提醒保持独立。
   const dueInput = document.querySelector('[name="dueAt"]');
   const reminderInput = document.querySelector('[name="reminderAt"]');
 
@@ -784,8 +784,6 @@ function bindEvents() {
     button.addEventListener("click", () => {
       const input = dialog.querySelector(`[name="${button.dataset.clearDatetime}"]`);
       input.value = "";
-      input.dataset.userCleared = "true";
-      input.dataset.autoDefault = "false";
       syncDatetimeControl(input);
       input.focus();
       announce(`${button.getAttribute("aria-label")}成功`);
@@ -793,19 +791,10 @@ function bindEvents() {
   });
 
   dueInput?.addEventListener("change", () => {
-    const canApplyInitialDefault =
-      !currentNote()?.dueAt &&
-      !reminderInput.value &&
-      reminderInput.dataset.userCleared !== "true";
-    if (canApplyInitialDefault) {
+    if (dueInput.value && !reminderInput.value) {
       reminderInput.value = dueInput.value;
-      reminderInput.dataset.autoDefault = "true";
       syncDatetimeControl(reminderInput);
     }
-  });
-  reminderInput?.addEventListener("input", () => {
-    reminderInput.dataset.autoDefault = "false";
-    reminderInput.dataset.userCleared = "false";
   });
 }
 
