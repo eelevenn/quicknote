@@ -391,23 +391,15 @@ function editorTemplate(context) {
   `;
 }
 
-function filterTabsTemplate() {
-  return `
-    <div class="filter-tabs" role="tablist" aria-label="便签范围">
-      <button type="button" role="tab" data-filter="active" aria-selected="${state.filter === "active"}">主页</button>
-      <button type="button" role="tab" data-filter="archived" aria-selected="${state.filter === "archived"}">已归档</button>
-    </div>
-  `;
-}
-
 function variantATemplate() {
   const note = currentNote();
+  const archivedCount = state.notes.filter((item) => item.archived).length;
+  const isArchiveView = state.filter === "archived";
   return `
     <main class="app-shell variant-a">
       <header class="a-header">
         <div class="brand-lockup">
-          <p class="eyebrow">QuickNote / 主页</p>
-          <h1>正在关注的便签</h1>
+          <span class="brand-name">QuickNote</span>
         </div>
         <div class="button-row">
           <button class="quiet-button" type="button" data-action="open-capture">唤起当前 <kbd>Ctrl ⇧ Space</kbd></button>
@@ -417,10 +409,16 @@ function variantATemplate() {
       <div class="a-layout">
         <section class="a-list-panel" aria-label="便签列表">
           <div class="panel-heading">
-            <div><p class="eyebrow">交接区</p><h2>${state.filter === "active" ? "主页" : "已归档"}</h2></div>
-            <span class="meta-badge">${visibleNotes().length} 张</span>
+            <div>
+              <h1>${isArchiveView ? "已归档" : "便签"}</h1>
+              <p class="panel-summary">${visibleNotes().length} 张${isArchiveView ? "可恢复" : "正在关注"}</p>
+            </div>
+            ${
+              isArchiveView
+                ? '<button class="archive-link" type="button" data-filter="active">← 返回便签</button>'
+                : `<button class="archive-link" type="button" data-filter="archived" aria-label="已归档${archivedCount ? `，${archivedCount} 张` : ""}">已归档${archivedCount ? `<span aria-hidden="true">${archivedCount}</span>` : ""}</button>`
+            }
           </div>
-          ${filterTabsTemplate()}
           <div class="a-note-list">${noteListTemplate("a")}</div>
         </section>
         <section class="a-editor-panel" aria-label="当前便签编辑器">

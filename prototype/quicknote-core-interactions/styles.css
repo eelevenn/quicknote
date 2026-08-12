@@ -209,14 +209,19 @@ button:disabled {
   justify-content: space-between;
   align-items: center;
   gap: 24px;
-  padding: 28px clamp(20px, 4vw, 58px) 20px;
+  min-height: 84px;
+  padding: 18px clamp(20px, 4vw, 58px);
 }
 
-.brand-lockup h1,
-.a-header h1 {
-  margin: 0;
-  font-size: clamp(24px, 3vw, 38px);
-  letter-spacing: -0.04em;
+.brand-lockup {
+  display: flex;
+  align-items: center;
+}
+
+.brand-name {
+  font-size: 18px;
+  font-weight: 780;
+  letter-spacing: -0.025em;
 }
 
 .a-layout {
@@ -228,7 +233,7 @@ button:disabled {
 
 .a-list-panel,
 .a-editor-panel {
-  min-height: calc(100vh - 155px);
+  min-height: calc(100vh - 114px);
   border: 1px solid rgba(215, 224, 218, 0.85);
   border-radius: var(--radius-lg);
   background: rgba(255, 255, 255, 0.82);
@@ -240,44 +245,54 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  align-items: flex-start;
-  padding: 22px 22px 14px;
+  align-items: center;
+  padding: 24px 22px 18px;
+  border-bottom: 1px solid rgba(220, 228, 223, 0.72);
 }
 
-.panel-heading h2,
+.panel-heading h1,
 .editor-heading h2 {
   margin: 0;
   font-size: 20px;
 }
 
-.filter-tabs {
-  display: flex;
-  gap: 4px;
-  margin: 0 20px 10px;
-  padding: 4px;
-  border-radius: 12px;
-  background: #edf1ee;
+.panel-summary {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
 }
 
-.filter-tabs button {
-  flex: 1;
+.archive-link {
   min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
   border: 0;
-  border-radius: 9px;
   background: transparent;
+  color: var(--muted);
   cursor: pointer;
+  font-size: 13px;
 }
 
-.filter-tabs button[aria-selected="true"] {
-  background: white;
-  box-shadow: 0 2px 10px rgba(25, 43, 36, 0.08);
+.archive-link:hover {
+  color: var(--ink);
+}
+
+.archive-link span {
+  min-width: 22px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #edf1ee;
+  color: var(--muted);
+  font-size: 11px;
   font-weight: 700;
 }
 
 .a-note-list {
   display: grid;
   gap: 8px;
-  padding: 8px 14px 20px;
+  padding: 12px 14px 20px;
 }
 
 .a-note-card {

@@ -10,7 +10,7 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 
 使用一个明确标记为 throwaway 的单页交互原型，以共享内存状态模拟快速记录浮窗和主页。原型提供三个结构明显不同、可通过 `?variant=A|B|C` 分享和切换的 UI variants：
 
-- `A — 专注接力`：便签列表和当前便签并列，突出两个 surface 之间的接力关系。
+- `A — 专注接力`：便签列表和当前便签并列，突出两个 surface 之间的接力关系；使用紧凑品牌栏，并将归档降级为低频次要入口。
 - `B — 命令中心`：紧凑导航、表格式列表和操作带，突出键盘效率与信息密度。
 - `C — 空间画布`：当前便签 hero 和便签画布，突出内容层级与操作可发现性。
 
@@ -81,6 +81,7 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 - A note's display title is derived from its first non-empty line; the remaining non-empty lines form its preview.
 - Archiving removes a note from the home page and clears its future reminder. A temporary undo restores the pre-archive snapshot.
 - Archived notes are browsed in a separate collection. Restoring returns the note to the home page and makes it current.
+- The home page does not repeat its identity across brand, page title and collection controls. The active collection is the default context, while archived notes use a visually secondary text entry with an optional count rather than an equal-weight tab.
 - Due time and reminder belong to the whole note. When a user adds a due time and no reminder exists, the reminder defaults to the same value; later reminder changes remain independent.
 - Voice capture is an explicit two-state action. Ending it inserts transcription at the current caret. Closing quick capture always ends the recording state.
 - On widths below the two-column breakpoint, home-page regions stack into one column without horizontal overflow. The exact production breakpoint remains an implementation detail to tune with the chosen desktop shell.
