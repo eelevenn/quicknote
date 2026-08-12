@@ -1,0 +1,39 @@
+import { VerticalBox, TextEdit } from "std-widgets.slint";
+
+export component BenchmarkWindow inherits Window {
+    title: "QuickNote · Slint benchmark";
+    width: 720px;
+    height: 480px;
+    background: #f7f4ee;
+    in-out property <string> note-text;
+    callback note-edited(string);
+
+    VerticalBox {
+        padding: 24px;
+        spacing: 12px;
+
+        Text {
+            text: "当前便签";
+            font-size: 20px;
+            font-weight: 600;
+            color: #211d19;
+        }
+
+        editor := TextEdit {
+            text <=> root.note-text;
+            wrap: word-wrap;
+            font-size: 15px;
+            edited => { root.note-edited(self.text); }
+        }
+
+        Text {
+            text: "Ctrl+Alt+Q 呼出 · 250 ms 自动保存 · benchmark prototype";
+            font-size: 12px;
+            color: #665d54;
+        }
+    }
+
+    public function focus-editor() {
+        editor.focus();
+    }
+}

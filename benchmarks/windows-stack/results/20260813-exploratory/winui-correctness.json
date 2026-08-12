@@ -1,0 +1,122 @@
+{
+    "candidate":  "winui",
+    "capturedAt":  "2026-08-13T03:39:40.7883858+08:00",
+    "interpretation":  "Lifecycle smoke only; this is not a content-level crash-recovery proof.",
+    "failureCount":  0,
+    "checks":  [
+                   {
+                       "check":  "single_instance",
+                       "iteration":  1,
+                       "success":  true,
+                       "detail":  "secondExitCode=0"
+                   },
+                   {
+                       "check":  "hotkey_focus",
+                       "iteration":  1,
+                       "success":  true,
+                       "detail":  "sequence=2"
+                   },
+                   {
+                       "check":  "hotkey_focus",
+                       "iteration":  2,
+                       "success":  true,
+                       "detail":  "sequence=3"
+                   },
+                   {
+                       "check":  "hotkey_focus",
+                       "iteration":  3,
+                       "success":  true,
+                       "detail":  "sequence=4"
+                   },
+                   {
+                       "check":  "hotkey_focus",
+                       "iteration":  4,
+                       "success":  true,
+                       "detail":  "sequence=5"
+                   },
+                   {
+                       "check":  "hotkey_focus",
+                       "iteration":  5,
+                       "success":  true,
+                       "detail":  "sequence=6"
+                   },
+                   {
+                       "check":  "hotkey_focus",
+                       "iteration":  6,
+                       "success":  true,
+                       "detail":  "sequence=7"
+                   },
+                   {
+                       "check":  "hotkey_focus",
+                       "iteration":  7,
+                       "success":  true,
+                       "detail":  "sequence=8"
+                   },
+                   {
+                       "check":  "hotkey_focus",
+                       "iteration":  8,
+                       "success":  true,
+                       "detail":  "sequence=9"
+                   },
+                   {
+                       "check":  "hotkey_focus",
+                       "iteration":  9,
+                       "success":  true,
+                       "detail":  "sequence=10"
+                   },
+                   {
+                       "check":  "hotkey_focus",
+                       "iteration":  10,
+                       "success":  true,
+                       "detail":  "sequence=11"
+                   },
+                   {
+                       "check":  "hide_lifecycle",
+                       "iteration":  1,
+                       "success":  true,
+                       "detail":  "sequence=11"
+                   },
+                   {
+                       "check":  "hide_lifecycle",
+                       "iteration":  2,
+                       "success":  true,
+                       "detail":  "sequence=12"
+                   },
+                   {
+                       "check":  "hide_lifecycle",
+                       "iteration":  3,
+                       "success":  true,
+                       "detail":  "sequence=12"
+                   },
+                   {
+                       "check":  "restart_recovery",
+                       "iteration":  1,
+                       "success":  true,
+                       "detail":  "sequence=1"
+                   },
+                   {
+                       "check":  "restart_recovery",
+                       "iteration":  2,
+                       "success":  true,
+                       "detail":  "sequence=1"
+                   },
+                   {
+                       "check":  "restart_recovery",
+                       "iteration":  3,
+                       "success":  true,
+                       "detail":  "sequence=1"
+                   },
+                   {
+                       "check":  "restart_recovery",
+                       "iteration":  4,
+                       "success":  true,
+                       "detail":  "sequence=1"
+                   },
+                   {
+                       "check":  "restart_recovery",
+                       "iteration":  5,
+                       "success":  true,
+                       "detail":  "sequence=1"
+                   }
+               ]
+}

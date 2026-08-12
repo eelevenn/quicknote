@@ -1,0 +1,62 @@
+{
+    "status":  "complete",
+    "interpretation":  "Exploratory only; reference lines are not pass/fail gates.",
+    "sourceRuns":  {
+                       "wpf":  "20260813-034539",
+                       "tauri":  "20260813-040918",
+                       "slint":  "20260813-041246",
+                       "winui":  "20260813-034539"
+                   },
+    "coldSamplesRequested":  20,
+    "hotSamplesRequested":  50,
+    "candidates":  [
+                       {
+                           "candidate":  "wpf",
+                           "status":  "measured",
+                           "coldP50Ms":  673.0922,
+                           "coldP95Ms":  882.4235,
+                           "hotP50Ms":  48.0065,
+                           "hotP95Ms":  64.4162,
+                           "idlePrivateWorkingSetP50Bytes":  41807872,
+                           "idlePrivateWorkingSetP95Bytes":  41807872,
+                           "releaseDirectoryBytes":  2333264,
+                           "failureCount":  0
+                       },
+                       {
+                           "candidate":  "tauri",
+                           "status":  "measured",
+                           "coldP50Ms":  633.0357,
+                           "coldP95Ms":  706.6516,
+                           "hotP50Ms":  64.5412,
+                           "hotP95Ms":  94.864,
+                           "idlePrivateWorkingSetP50Bytes":  95432704,
+                           "idlePrivateWorkingSetP95Bytes":  96145408,
+                           "releaseDirectoryBytes":  4430336,
+                           "failureCount":  0
+                       },
+                       {
+                           "candidate":  "slint",
+                           "status":  "measured",
+                           "coldP50Ms":  126.41560000000001,
+                           "coldP95Ms":  128.6845,
+                           "hotP50Ms":  32.384,
+                           "hotP95Ms":  33.5785,
+                           "idlePrivateWorkingSetP50Bytes":  6057984,
+                           "idlePrivateWorkingSetP95Bytes":  6156288,
+                           "releaseDirectoryBytes":  10721280,
+                           "failureCount":  0
+                       },
+                       {
+                           "candidate":  "winui",
+                           "status":  "measured",
+                           "coldP50Ms":  474.0267,
+                           "coldP95Ms":  506.2434,
+                           "hotP50Ms":  32.3224,
+                           "hotP95Ms":  33.5413,
+                           "idlePrivateWorkingSetP50Bytes":  39940096,
+                           "idlePrivateWorkingSetP95Bytes":  39940096,
+                           "releaseDirectoryBytes":  82471977,
+                           "failureCount":  0
+                       }
+                   ]
+}

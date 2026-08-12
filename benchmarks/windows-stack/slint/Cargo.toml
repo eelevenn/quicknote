@@ -1,0 +1,21 @@
+[package]
+name = "quicknote-stack-slint"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+quicknote-benchmark-support = { path = "../rust-support" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+slint = { version = "1.17.1", default-features = false, features = ["backend-winit", "renderer-software", "std", "compat-1-2"] }
+tray-icon = "0.24.2"
+
+[build-dependencies]
+slint-build = "1.17.1"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+panic = "abort"
+strip = "symbols"

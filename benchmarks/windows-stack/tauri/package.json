@@ -1,0 +1,13 @@
+{
+  "name": "quicknote-stack-benchmark-tauri",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "tauri": "tauri",
+    "icon": "tauri icon app-icon.svg"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  },
+  "dependencies": {}
+}

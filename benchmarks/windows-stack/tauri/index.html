@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QuickNote · Tauri benchmark</title>
+    <style>
+      :root { font-family: "Segoe UI", sans-serif; color: #211d19; background: #f7f4ee; }
+      * { box-sizing: border-box; }
+      body { margin: 0; height: 100vh; padding: 24px; display: grid; grid-template-rows: auto 1fr auto; gap: 12px; }
+      h1 { margin: 0; font-size: 20px; font-weight: 600; }
+      textarea { width: 100%; resize: none; padding: 14px; border: 1px solid #cfc6bb; border-radius: 6px; font: 15px/1.5 "Segoe UI", sans-serif; }
+      footer { color: #665d54; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>当前便签</h1>
+    <textarea id="editor" spellcheck="false"></textarea>
+    <footer>Ctrl+Alt+Q 呼出 · 250 ms 自动保存 · benchmark prototype</footer>
+    <script>
+      document.addEventListener("DOMContentLoaded", async () => {
+      const { invoke } = window.__TAURI__.core;
+      const currentWindow = window.__TAURI__.window.getCurrentWindow();
+      const editor = document.querySelector("#editor");
+      let saveTimer = null;
+      let loading = true;
+
+      // The sentinel mutation proves that the WebView editor can accept text.
+      window.benchmarkReady = async () => {
+        editor.focus();
+        const start = editor.selectionStart;
+        editor.setRangeText("§", start, start, "end");
+        editor.setRangeText("", start, start + 1, "end");
+        await invoke("editor_ready");
+      };
+      window.benchmarkFlush = async () => {
+        clearTimeout(saveTimer);
+        await invoke("save_note", { body: editor.value });
+      };
+      window.benchmarkHide = async () => {
+        await window.benchmarkFlush();
+        await currentWindow.hide();
+      };
+      window.benchmarkExit = async () => {
+        await window.benchmarkFlush();
+        await invoke("exit_app");
+      };
+
+      editor.value = await invoke("load_note");
+      loading = false;
+      editor.addEventListener("input", () => {
+        if (loading) return;
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => invoke("save_note", { body: editor.value }), 250);
+      });
+
+      // Closing the window is equivalent to hiding it and forces a flush.
+      currentWindow.onCloseRequested(async (event) => {
+        event.preventDefault();
+        await window.benchmarkHide();
+      });
+      await window.benchmarkReady();
+      });
+    </script>
+  </body>
+</html>

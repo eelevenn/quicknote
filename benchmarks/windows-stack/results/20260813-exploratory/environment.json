@@ -1,0 +1,30 @@
+{
+    "capturedAt":  "2026-08-13T04:12:49.1230804+08:00",
+    "windows":  {
+                    "caption":  "Microsoft Windows 11 Pro",
+                    "version":  "10.0.26200",
+                    "build":  "26200"
+                },
+    "hardware":  {
+                     "manufacturer":  "ASUS",
+                     "model":  "System Product Name",
+                     "cpu":  "AMD Ryzen 5 7500F 6-Core Processor",
+                     "cores":  6,
+                     "logicalProcessors":  12,
+                     "memoryBytes":  33999364096,
+                     "gpu":  [
+                                 "Zako Display Adapter",
+                                 "GameViewer Virtual Display Adapter",
+                                 "NVIDIA GeForce RTX 4060 Ti"
+                             ]
+                 },
+    "shell":  "5.1.26100.8972",
+    "powerScheme":  "电源方案 GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (平衡)",
+    "tools":  {
+                  "dotnet":  "10.0.400",
+                  "node":  "v24.19.0",
+                  "npm":  "11.17.0",
+                  "rustc":  "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+                  "cargo":  "cargo 1.97.1 (c980f4866 2026-06-30)"
+              }
+}

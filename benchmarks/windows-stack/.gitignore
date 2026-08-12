@@ -1,0 +1,11 @@
+# Build and dependency caches are reproducible from manifests and lockfiles.
+**/bin/
+**/obj/
+**/node_modules/
+**/target/
+
+# Keep only the curated formal result set under version control.
+results/*/
+!results/.gitkeep
+!results/20260813-exploratory/
+!results/20260813-exploratory/**

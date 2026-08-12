@@ -1,0 +1,14 @@
+QuickNote 候选技术栈基准固定便签
+
+这是一份用于 Windows 桌面候选横向比较的固定 Unicode 文本。它同时覆盖中文、English、数字 0123456789、常用标点，和需要由 Microsoft Pinyin 完成的组合输入路径。
+
+测试目标不是排版或 Markdown 渲染，而是确认基础多行编辑器能够加载 SQLite 内容、接受键盘焦点、完成粘贴与撤销，并通过 250 ms trailing debounce 保存。窗口隐藏前必须同步 flush，重新启动后应逐字恢复最后一次已确认的正文。
+
+Reference checklist:
+- system tray remains available while the window is hidden;
+- Ctrl+Alt+Q shows, activates, and focuses the editor;
+- SQLite uses WAL and synchronous=NORMAL;
+- a sentinel character can be inserted and removed;
+- missing measurements remain null rather than becoming negative evidence.
+
+为接近真实便签负载，seed generator 会重复这段内容直到 UTF-8 文件约为 8 KiB。本文件保留短小且可审查，重复只发生在生成数据库时。

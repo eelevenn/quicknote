@@ -1,0 +1,35 @@
+{
+  "capturedAt": "2026-08-13T03:52:00+08:00",
+  "interpretation": "Detected shared-runtime footprints on this host; these are not clean-install deltas attributable to QuickNote.",
+  "installerArtifacts": {
+    "measured": false,
+    "reason": "The quick exploratory scope produced Release directories, not signed installers or a clean VM installation trace."
+  },
+  "candidates": {
+    "wpf": {
+      "releaseDirectoryBytes": 2333264,
+      "sharedRuntime": ".NET Framework 4.8.1",
+      "detectedReleaseRegistryValue": 533509,
+      "detectedRuntimeBytes": null
+    },
+    "tauri": {
+      "releaseDirectoryBytes": 4430336,
+      "sharedRuntime": "Microsoft Edge WebView2 Runtime",
+      "detectedVersion": "151.0.4129.78",
+      "detectedRuntimeDirectoryBytes": 890858460
+    },
+    "slint": {
+      "releaseDirectoryBytes": 10721280,
+      "sharedRuntime": null,
+      "note": "SQLite and the Slint software renderer are included in the executable."
+    },
+    "winui": {
+      "releaseDirectoryBytes": 82471977,
+      "sharedRuntime": ".NET 10 and Windows App Runtime 2",
+      "detectedDotNetCoreVersion": "10.0.11",
+      "detectedDotNetCoreRuntimeBytes": 79823136,
+      "detectedWindowsAppRuntimeVersion": "2.3.1.0",
+      "detectedWindowsAppRuntimeX64Bytes": 113029615
+    }
+  }
+}
