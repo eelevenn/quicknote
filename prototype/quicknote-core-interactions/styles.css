@@ -861,11 +861,63 @@ button:disabled {
   font-weight: 700;
 }
 
-.field input {
+.datetime-control {
+  position: relative;
+}
+
+.datetime-control input {
+  width: 100%;
   min-height: 44px;
-  padding: 0 12px;
+  padding: 0 72px 0 12px;
   border: 1px solid #c9d3cd;
   border-radius: 10px;
+}
+
+.datetime-empty {
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.datetime-control.has-value .datetime-empty {
+  display: none;
+}
+
+/* 空值时隐藏浏览器自带的 yyyy/mm 提示，但保留右侧日历入口。 */
+.datetime-control:not(.has-value) input::-webkit-datetime-edit {
+  opacity: 0;
+}
+
+.datetime-clear {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  right: 38px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  transform: translateY(-50%);
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #edf1ee;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.datetime-clear:hover {
+  background: #dde6e0;
+  color: var(--ink);
+}
+
+.datetime-clear[hidden] {
+  display: none;
 }
 
 .field-hint {

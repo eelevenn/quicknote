@@ -579,6 +579,19 @@ function captureTemplate() {
 
 function metadataDialogTemplate() {
   const note = currentNote();
+  const datetimeControl = ({ id, name, label, value }) => `
+    <div class="datetime-control ${value ? "has-value" : ""}" data-datetime-control>
+      <input id="${id}" name="${name}" type="datetime-local" value="${escapeHtml(value || "")}" />
+      <span class="datetime-empty" aria-hidden="true">----/--/-- --:--</span>
+      <button
+        class="datetime-clear"
+        type="button"
+        data-clear-datetime="${name}"
+        aria-label="清除${label}"
+        ${value ? "" : "hidden"}
+      >×</button>
+    </div>
+  `;
   return `
     <dialog class="meta-dialog" data-metadata-dialog aria-labelledby="metadata-title">
       <form method="dialog" data-metadata-form>
@@ -589,12 +602,12 @@ function metadataDialogTemplate() {
         <div class="dialog-body">
           <div class="field">
             <label for="reminder-at">提醒</label>
-            <input id="reminder-at" name="reminderAt" type="datetime-local" value="${escapeHtml(note?.reminderAt || "")}" />
+            ${datetimeControl({ id: "reminder-at", name: "reminderAt", label: "提醒", value: note?.reminderAt })}
             <p class="field-hint">提醒可以独立修改或清除；它不改变截止时间。</p>
           </div>
           <div class="field">
             <label for="due-at">截止时间</label>
-            <input id="due-at" name="dueAt" type="datetime-local" value="${escapeHtml(note?.dueAt || "")}" />
+            ${datetimeControl({ id: "due-at", name: "dueAt", label: "截止时间", value: note?.dueAt })}
             <p class="field-hint">首次设置截止时间时，会默认在同一时刻添加提醒。</p>
           </div>
         </div>
@@ -695,10 +708,9 @@ function saveMetadata(form) {
   if (!note) return;
   const formData = new FormData(form);
   const dueAt = String(formData.get("dueAt") || "");
-  const reminderInput = form.querySelector('[name="reminderAt"]');
-  const reminderWasUntouched = reminderInput.dataset.autoDefault === "true";
   note.dueAt = dueAt;
-  note.reminderAt = reminderWasUntouched ? dueAt : String(formData.get("reminderAt") || "");
+  // 默认联动只发生在编辑阶段；保存时两个字段始终按当前值独立写入。
+  note.reminderAt = String(formData.get("reminderAt") || "");
   note.updatedAt = Date.now();
   state.metadataOpen = false;
   queueAutosave();
@@ -753,14 +765,47 @@ function bindEvents() {
   // 截止时间首次填写时，提醒输入框显示同值，但仍允许用户独立修改。
   const dueInput = document.querySelector('[name="dueAt"]');
   const reminderInput = document.querySelector('[name="reminderAt"]');
+
+  // 空值使用明确的横线占位；有值时显示独立清除键，不依赖浏览器格式提示。
+  const syncDatetimeControl = (input) => {
+    const control = input?.closest("[data-datetime-control]");
+    if (!control) return;
+    const hasValue = Boolean(input.value);
+    control.classList.toggle("has-value", hasValue);
+    control.querySelector("[data-clear-datetime]").hidden = !hasValue;
+  };
+
+  [reminderInput, dueInput].forEach((input) => {
+    input?.addEventListener("input", () => syncDatetimeControl(input));
+    input?.addEventListener("change", () => syncDatetimeControl(input));
+  });
+
+  document.querySelectorAll("[data-clear-datetime]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const input = dialog.querySelector(`[name="${button.dataset.clearDatetime}"]`);
+      input.value = "";
+      input.dataset.userCleared = "true";
+      input.dataset.autoDefault = "false";
+      syncDatetimeControl(input);
+      input.focus();
+      announce(`${button.getAttribute("aria-label")}成功`);
+    });
+  });
+
   dueInput?.addEventListener("change", () => {
-    if (!reminderInput.value) {
+    const canApplyInitialDefault =
+      !currentNote()?.dueAt &&
+      !reminderInput.value &&
+      reminderInput.dataset.userCleared !== "true";
+    if (canApplyInitialDefault) {
       reminderInput.value = dueInput.value;
       reminderInput.dataset.autoDefault = "true";
+      syncDatetimeControl(reminderInput);
     }
   });
   reminderInput?.addEventListener("input", () => {
     reminderInput.dataset.autoDefault = "false";
+    reminderInput.dataset.userCleared = "false";
   });
 }
 

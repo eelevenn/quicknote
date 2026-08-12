@@ -74,6 +74,8 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 52. As a QuickNote user, I want reminder metadata shown before due metadata, so that the earlier intervention is read before the final deadline.
 53. As a QuickNote user, I want `Esc` and the close icon to close only quick capture, so that dismissal is not confused with main-window navigation.
 54. As a QuickNote user, I want an explicit `打开主窗口` action in quick capture, so that I can intentionally transition into the full application workspace.
+55. As a QuickNote user, I want unset time fields to display a neutral dashed empty state, so that browser format hints are not mistaken for saved values.
+56. As a QuickNote user, I want a visible clear icon beside each configured time, so that reminder and due time can be removed independently in one action.
 
 ## Implementation Decisions
 
@@ -86,6 +88,7 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 - `Esc`, clicking outside, and the close icon dismiss quick capture without claiming to navigate anywhere. The quick-capture footer instead offers an explicit `打开主窗口` action that activates and shows the App main window focused on the current note.
 - New-note creation is located at the lower-right of the note collection. It opens an uncommitted draft in the persistent editor on wide layouts and in quick capture on single-column layouts.
 - Reminder precedes due time in both metadata summaries and the time editor; the dialog title follows the same `提醒与截止时间` order.
+- Empty reminder and due controls display `----/--/-- --:--` instead of the browser's locale format hint. A configured control exposes an accessible floating clear icon beside the calendar affordance; clearing one value never clears the other.
 - The first quick-capture focus goes to the editor with the caret at the content end. Renders caused by autosave feedback preserve the user's current selection.
 - New-note creation begins as an uncommitted in-memory draft. The draft joins the note collection and becomes current only after non-blank input; closing an untouched draft discards it without trace.
 - Autosave is the only save interaction. The UI exposes transient `正在保存…` and settled `已自动保存` feedback without a save button.
@@ -109,6 +112,7 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 - Test that the shortcut always opens quick capture at both wide and narrow widths, and that the wide persistent editor has no duplicate `快速记录` action.
 - Test that `Esc` and the close icon only dismiss quick capture, while `打开主窗口` invokes the main-window activation boundary and focuses the current note.
 - Test that the time editor presents reminder before due time while preserving the default linkage and independent reminder editing.
+- Test time-control presentation and clearing: empty values use the dashed state, configured values expose correctly named clear controls, and clearing either reminder or due time preserves the other value after save.
 - Test new-note lifecycle: an untouched draft cancels without creating a note; the first non-blank input creates it and makes it current; the former current note is unchanged.
 - Test autosave by observing settled visible feedback and re-reading through the application's public note surface after the persistence design exists. Do not test debounce timers or private storage calls directly.
 - Test archive behavior through the home page: the note disappears from active notes, future reminder presentation is absent, undo restores it, and archived browsing plus restore returns it as current.
