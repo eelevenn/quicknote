@@ -124,6 +124,11 @@ function announce(message) {
   document.querySelector("#live-region").textContent = message;
 }
 
+// A 的单栏断点与 CSS 保持一致；单栏没有常驻编辑区，改由浮窗承接编辑。
+function usesCompactCapture() {
+  return state.variant === "A" && window.matchMedia("(max-width: 900px)").matches;
+}
+
 // 浮窗打开时页面仍保留主页 editor，因此始终选取当前可见的那一个。
 function activeEditor() {
   return state.surface === "capture"
@@ -173,10 +178,14 @@ function startNewNote() {
     reminderAt: "",
     updatedAt: Date.now(),
   };
-  state.surface = "capture";
+  state.surface = usesCompactCapture() || state.variant !== "A" ? "capture" : "home";
   state.recording = false;
   render({ focusEditor: true });
-  announce("已打开空白新便签；不输入内容即可无痕取消");
+  announce(
+    state.surface === "capture"
+      ? "已打开空白新便签；不输入内容即可无痕取消"
+      : "已在编辑区打开空白新便签；不输入内容并切换便签即可无痕取消",
+  );
 }
 
 function openCapture() {
@@ -199,6 +208,12 @@ function openNote(noteId) {
   state.currentId = noteId;
   state.draft = null;
   state.recording = false;
+  if (state.variant === "A" && !usesCompactCapture()) {
+    state.surface = "home";
+    render({ focusEditor: true });
+    announce(`已切换当前便签：${noteTitle(currentNote())}`);
+    return;
+  }
   openCapture();
 }
 
@@ -305,8 +320,8 @@ function saveBadgeTemplate() {
 
 function metadataBadgesTemplate(note) {
   return `
-    ${note.dueAt ? `<span class="meta-badge">截止 ${formatDate(note.dueAt)}</span>` : ""}
     ${note.reminderAt ? `<span class="meta-badge">提醒 ${formatDate(note.reminderAt)}</span>` : ""}
+    ${note.dueAt ? `<span class="meta-badge">截止 ${formatDate(note.dueAt)}</span>` : ""}
   `;
 }
 
@@ -368,6 +383,17 @@ function editorTemplate(context) {
   if (!note) return `<div class="empty-state">没有可编辑的便签。</div>`;
   const restore = note.archived;
   const editorClass = context === "capture" ? "capture-editor" : "main-editor";
+  const lifecycleAction = restore
+    ? '<button class="primary-button" type="button" data-action="restore-current">恢复到主页</button>'
+    : state.draft
+      ? ""
+      : '<button class="danger-button" type="button" data-action="archive-current">归档</button>';
+  const surfaceAction =
+    context === "capture"
+      ? '<button class="quiet-button" type="button" data-action="close-capture">返回主页 <kbd>Esc</kbd></button>'
+      : context === "b"
+        ? '<button class="primary-button" type="button" data-action="open-capture">快速记录</button>'
+        : "";
   return `
     <textarea
       class="${editorClass}"
@@ -384,8 +410,8 @@ function editorTemplate(context) {
         <button class="chip-button" type="button" data-action="open-metadata">◷ 时间</button>
       </div>
       <div class="button-row">
-        ${restore ? '<button class="primary-button" type="button" data-action="restore-current">恢复到主页</button>' : '<button class="danger-button" type="button" data-action="archive-current">归档</button>'}
-        ${context === "capture" ? '<button class="quiet-button" type="button" data-action="close-capture">返回主页 <kbd>Esc</kbd></button>' : '<button class="primary-button" type="button" data-action="open-capture">快速记录</button>'}
+        ${lifecycleAction}
+        ${surfaceAction}
       </div>
     </div>
   `;
@@ -403,7 +429,6 @@ function variantATemplate() {
         </div>
         <div class="button-row">
           <button class="quiet-button" type="button" data-action="open-capture">唤起当前 <kbd>Ctrl ⇧ Space</kbd></button>
-          <button class="primary-button" type="button" data-action="new-note">＋ 新建便签</button>
         </div>
       </header>
       <div class="a-layout">
@@ -420,6 +445,11 @@ function variantATemplate() {
             }
           </div>
           <div class="a-note-list">${noteListTemplate("a")}</div>
+          ${
+            isArchiveView
+              ? ""
+              : '<footer class="a-list-footer"><button class="primary-button" type="button" data-action="new-note">＋ 新建便签</button></footer>'
+          }
         </section>
         <section class="a-editor-panel" aria-label="当前便签编辑器">
           <div class="editor-heading">
@@ -662,7 +692,9 @@ function bindEvents() {
   document.querySelectorAll("[data-note-id]").forEach((button) => {
     button.addEventListener("click", () => {
       const note = state.notes.find((item) => item.id === button.dataset.noteId);
-      if (note?.archived) {
+      if (state.variant === "A") {
+        openNote(button.dataset.noteId);
+      } else if (note?.archived) {
         state.currentId = note.id;
         render();
       } else {
@@ -759,6 +791,15 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && state.surface === "capture") {
     event.preventDefault();
     closeCapture();
+    return;
+  }
+
+  if (event.key === "Escape" && state.draft && state.surface === "home") {
+    event.preventDefault();
+    state.draft = null;
+    render();
+    document.querySelector('[data-action="new-note"]')?.focus();
+    announce("空白新便签已无痕取消");
     return;
   }
 

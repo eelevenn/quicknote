@@ -10,7 +10,7 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 
 使用一个明确标记为 throwaway 的单页交互原型，以共享内存状态模拟快速记录浮窗和主页。原型提供三个结构明显不同、可通过 `?variant=A|B|C` 分享和切换的 UI variants：
 
-- `A — 专注接力`：便签列表和当前便签并列，突出两个 surface 之间的接力关系；使用紧凑品牌栏，并将归档降级为低频次要入口。
+- `A — 专注接力`：宽窗口在右侧直接编辑，单栏由快速记录浮窗承接；使用紧凑品牌栏，并将归档降级为低频次要入口。
 - `B — 命令中心`：紧凑导航、表格式列表和操作带，突出键盘效率与信息密度。
 - `C — 空间画布`：当前便签 hero 和便签画布，突出内容层级与操作可发现性。
 
@@ -68,13 +68,21 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 46. As a product reviewer, I want the relevant in-memory state visible in the prototype, so that every action's effect can be inspected directly.
 47. As a developer, I want the prototype isolated from production code and persistence, so that interaction learning does not constrain the final architecture.
 48. As a developer, I want real OS integration excluded from this prototype, so that technical feasibility decisions remain with their dedicated issues.
+49. As a wide-window user, I want selecting a note to focus the persistent editor without opening another surface, so that the home page remains a direct editing workspace.
+50. As a single-column user, I want selecting a note to open quick capture, so that editing remains available when the persistent editor is hidden.
+51. As a QuickNote user, I want new-note creation at the lower-right of the note collection, so that the action is visually associated with the collection it changes.
+52. As a QuickNote user, I want reminder metadata shown before due metadata, so that the earlier intervention is read before the final deadline.
 
 ## Implementation Decisions
 
 - Use one highest-level acceptance seam: drive the complete user journey through the visible quick-capture and home-page surfaces while observing their shared note state.
 - Treat `便签`, `当前便签`, `主页`, `截止时间`, `提醒` and `归档` according to the project domain glossary; do not replace them with note, task, inbox, completion or deletion semantics in Chinese product copy.
 - Use one state owner for both surfaces. The current note identifier, note collection, temporary draft, active/archived filter, save feedback, recording state and current surface are represented together.
-- Opening any active note from the home page changes the current note before quick capture is shown.
+- Opening any active note from the home page changes the current note immediately; the next shortcut activation opens that same note in quick capture.
+- On wide layouts, selecting a note changes the current note and focuses the persistent editor without opening quick capture. On single-column layouts where the persistent editor is hidden, the same selection opens quick capture.
+- Quick capture is reserved for shortcut activation and layouts without a persistent editor. The wide home-page editor does not repeat a `快速记录` action.
+- New-note creation is located at the lower-right of the note collection. It opens an uncommitted draft in the persistent editor on wide layouts and in quick capture on single-column layouts.
+- When both reminder and due metadata are present, reminder is displayed before due time.
 - The first quick-capture focus goes to the editor with the caret at the content end. Renders caused by autosave feedback preserve the user's current selection.
 - New-note creation begins as an uncommitted in-memory draft. The draft joins the note collection and becomes current only after non-blank input; closing an untouched draft discards it without trace.
 - Autosave is the only save interaction. The UI exposes transient `正在保存…` and settled `已自动保存` feedback without a save button.
@@ -84,7 +92,7 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 - The home page does not repeat its identity across brand, page title and collection controls. The active collection is the default context, while archived notes use a visually secondary text entry with an optional count rather than an equal-weight tab.
 - Due time and reminder belong to the whole note. When a user adds a due time and no reminder exists, the reminder defaults to the same value; later reminder changes remain independent.
 - Voice capture is an explicit two-state action. Ending it inserts transcription at the current caret. Closing quick capture always ends the recording state.
-- On widths below the two-column breakpoint, home-page regions stack into one column without horizontal overflow. The exact production breakpoint remains an implementation detail to tune with the chosen desktop shell.
+- On widths below the two-column breakpoint, the persistent editor is hidden and quick capture becomes the editing surface, leaving one note-list column without horizontal overflow. The exact production breakpoint remains an implementation detail to tune with the chosen desktop shell.
 - The production direction should start from variant A's explicit list/current-note relationship, combine variant B's compact metadata and keyboard guidance, and borrow variant C's strong current-note hierarchy. None of the throwaway variant code should be promoted directly.
 - The prototype switcher is not a product control. It updates a URL search parameter, wraps across variants, responds to left/right arrows outside editing controls and remains visually separate from the evaluated UI.
 - The final framework, component system, persistence mechanism and desktop window implementation remain open until their dedicated architecture decisions are resolved.
@@ -94,6 +102,8 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 - Good tests assert external behavior across the visible surface boundary rather than CSS classes, internal state object shape, timer implementation or framework components.
 - The preferred acceptance seam is a desktop-shell journey test that can invoke the application's quick-capture command, interact with the home page, and observe the resulting current note and visible content. This remains one seam even if the shell internally routes an OS hotkey into the same command.
 - Test the current-note journey: quick capture opens the current note, focuses the editor at the end, home-page selection changes current immediately, and the next quick capture opens that selected note.
+- Test both responsive selection paths: a wide home page changes and focuses the persistent editor without a floating window, while a single-column home page opens quick capture for the selected note.
+- Test that the shortcut always opens quick capture at both wide and narrow widths, and that the wide persistent editor has no duplicate `快速记录` action.
 - Test new-note lifecycle: an untouched draft cancels without creating a note; the first non-blank input creates it and makes it current; the former current note is unchanged.
 - Test autosave by observing settled visible feedback and re-reading through the application's public note surface after the persistence design exists. Do not test debounce timers or private storage calls directly.
 - Test archive behavior through the home page: the note disappears from active notes, future reminder presentation is absent, undo restores it, and archived browsing plus restore returns it as current.
