@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="QuickNote 快速记录与主页核心交互的 throwaway prototype"
+    />
+    <title>QuickNote 核心交互原型</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- 应用界面由共享内存状态渲染，刷新页面即恢复演示数据。 -->
+    <div id="app"></div>
+    <div id="live-region" class="sr-only" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

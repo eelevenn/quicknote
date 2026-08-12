@@ -1,0 +1,1102 @@
+/*
+ * 三个 variants 共用 design tokens，但布局、层级和主要 affordance 各不相同。
+ * 原型刻意避免生产级抽象，只保留判断交互所需的样式。
+ */
+:root {
+  color-scheme: light;
+  --ink: #17201d;
+  --muted: #64706b;
+  --line: #dce4df;
+  --paper: #f7f8f3;
+  --panel: #ffffff;
+  --accent: #176b51;
+  --accent-strong: #0b4b38;
+  --accent-soft: #e2f1e9;
+  --danger: #a13c37;
+  --warning: #8a5d12;
+  --shadow: 0 20px 55px rgba(25, 43, 36, 0.14);
+  --radius-lg: 24px;
+  --radius-md: 16px;
+  --radius-sm: 10px;
+  font-family:
+    Inter, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  min-width: 320px;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid #3aa77d;
+  outline-offset: 3px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.app-shell {
+  min-height: 100vh;
+  padding-bottom: 88px;
+}
+
+.icon-button,
+.quiet-button,
+.primary-button,
+.danger-button,
+.chip-button {
+  min-height: 40px;
+  border: 0;
+  border-radius: 12px;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    background 120ms ease;
+}
+
+.icon-button:hover,
+.quiet-button:hover,
+.primary-button:hover,
+.danger-button:hover,
+.chip-button:hover {
+  transform: translateY(-1px);
+}
+
+.icon-button {
+  width: 40px;
+  padding: 0;
+  background: transparent;
+  font-size: 18px;
+}
+
+.quiet-button,
+.chip-button {
+  padding: 0 14px;
+  background: #edf1ee;
+}
+
+.primary-button {
+  padding: 0 18px;
+  background: var(--accent);
+  color: white;
+  font-weight: 650;
+}
+
+.danger-button {
+  padding: 0 14px;
+  background: #f8e8e6;
+  color: var(--danger);
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  display: inline-block;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.current-badge,
+.meta-badge,
+.save-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.current-badge {
+  padding: 6px 10px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.meta-badge,
+.save-badge {
+  padding: 5px 9px;
+  background: #edf1ee;
+  color: var(--muted);
+}
+
+.save-badge.saving {
+  background: #fff0ce;
+  color: var(--warning);
+}
+
+.note-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+/* Variant A：并列双栏，右侧当前便签是稳定视觉锚点。 */
+.variant-a {
+  background:
+    radial-gradient(circle at 5% 4%, #e4f2e9 0, transparent 26%),
+    var(--paper);
+}
+
+.a-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+  padding: 28px clamp(20px, 4vw, 58px) 20px;
+}
+
+.brand-lockup h1,
+.a-header h1 {
+  margin: 0;
+  font-size: clamp(24px, 3vw, 38px);
+  letter-spacing: -0.04em;
+}
+
+.a-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.85fr) minmax(420px, 1.15fr);
+  gap: 18px;
+  padding: 0 clamp(20px, 4vw, 58px) 30px;
+}
+
+.a-list-panel,
+.a-editor-panel {
+  min-height: calc(100vh - 155px);
+  border: 1px solid rgba(215, 224, 218, 0.85);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 10px 40px rgba(25, 43, 36, 0.06);
+  backdrop-filter: blur(12px);
+}
+
+.panel-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  padding: 22px 22px 14px;
+}
+
+.panel-heading h2,
+.editor-heading h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.filter-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 20px 10px;
+  padding: 4px;
+  border-radius: 12px;
+  background: #edf1ee;
+}
+
+.filter-tabs button {
+  flex: 1;
+  min-height: 36px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.filter-tabs button[aria-selected="true"] {
+  background: white;
+  box-shadow: 0 2px 10px rgba(25, 43, 36, 0.08);
+  font-weight: 700;
+}
+
+.a-note-list {
+  display: grid;
+  gap: 8px;
+  padding: 8px 14px 20px;
+}
+
+.a-note-card {
+  width: 100%;
+  padding: 16px;
+  border: 1px solid transparent;
+  border-radius: 15px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.a-note-card:hover,
+.a-note-card.active {
+  border-color: var(--line);
+  background: white;
+}
+
+.a-note-card.active {
+  box-shadow: 0 8px 24px rgba(25, 43, 36, 0.08);
+}
+
+.a-note-card h3 {
+  margin: 8px 0 5px;
+  font-size: 16px;
+}
+
+.a-note-card p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.a-editor-panel {
+  display: flex;
+  flex-direction: column;
+  padding: 26px;
+}
+
+.editor-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.editor-heading h2 {
+  max-width: 620px;
+  font-size: clamp(24px, 3vw, 36px);
+  letter-spacing: -0.035em;
+}
+
+.editor-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 10px;
+}
+
+.main-editor {
+  width: 100%;
+  flex: 1;
+  min-height: 300px;
+  resize: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.75;
+}
+
+.main-editor:focus {
+  outline: none;
+}
+
+.editor-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+/* Variant B：高密度 command center，侧栏和表格优先。 */
+.variant-b {
+  background: #131715;
+  color: #edf4ef;
+}
+
+.variant-b .muted,
+.variant-b .note-preview {
+  color: #9aa79f;
+}
+
+.b-layout {
+  display: grid;
+  grid-template-columns: 212px minmax(360px, 0.9fr) minmax(430px, 1.1fr);
+  min-height: calc(100vh - 88px);
+}
+
+.b-sidebar {
+  padding: 30px 18px;
+  border-right: 1px solid #303833;
+  background: #0c0f0d;
+}
+
+.b-logo {
+  margin: 0 8px 34px;
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.b-nav {
+  display: grid;
+  gap: 7px;
+}
+
+.b-nav button {
+  min-height: 42px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #b8c3bc;
+  text-align: left;
+  cursor: pointer;
+}
+
+.b-nav button.active {
+  background: #25352e;
+  color: white;
+  font-weight: 700;
+}
+
+.b-shortcut {
+  margin-top: 40px;
+  padding: 14px;
+  border: 1px solid #35423a;
+  border-radius: 12px;
+  color: #aab6ae;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.b-shortcut kbd {
+  display: inline-block;
+  margin-top: 7px;
+  padding: 4px 7px;
+  border: 1px solid #536159;
+  border-radius: 6px;
+  background: #202622;
+  color: white;
+}
+
+.b-list-panel {
+  border-right: 1px solid #303833;
+  background: #171c19;
+}
+
+.b-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  min-height: 82px;
+  padding: 18px 22px;
+  border-bottom: 1px solid #303833;
+}
+
+.b-toolbar h1 {
+  margin: 0;
+  font-size: 21px;
+}
+
+.b-toolbar .primary-button {
+  background: #d4f8e5;
+  color: #0b3728;
+}
+
+.b-table-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 16px 22px;
+  border: 0;
+  border-bottom: 1px solid #2b322e;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.b-table-row:hover,
+.b-table-row.active {
+  background: #213129;
+}
+
+.b-table-row h3 {
+  margin: 0 0 7px;
+  overflow: hidden;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.b-table-row p {
+  margin: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.b-editor-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: #1c211e;
+}
+
+.b-editor-head {
+  min-height: 82px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 24px;
+  border-bottom: 1px solid #303833;
+}
+
+.b-editor-head h2 {
+  margin: 0;
+  overflow: hidden;
+  font-size: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.variant-b .main-editor {
+  padding: 30px;
+  color: #edf4ef;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 15px;
+}
+
+.b-action-rail {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 24px;
+  border-top: 1px solid #303833;
+}
+
+.variant-b .quiet-button,
+.variant-b .chip-button {
+  background: #2b332e;
+  color: #edf4ef;
+}
+
+.variant-b .danger-button {
+  background: #482522;
+  color: #ffccc7;
+}
+
+/* Variant C：hero + masonry canvas，强调视觉层级和可发现性。 */
+.variant-c {
+  background: #f1ecdf;
+  color: #2d2821;
+}
+
+.c-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 25px clamp(18px, 5vw, 72px);
+}
+
+.c-wordmark {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 24px;
+  font-style: italic;
+  font-weight: 700;
+}
+
+.c-main {
+  padding: 0 clamp(18px, 5vw, 72px) 40px;
+}
+
+.c-hero {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 28px;
+  min-height: 300px;
+  padding: clamp(28px, 5vw, 62px);
+  border-radius: 34px;
+  background: #193e32;
+  color: #f6f2e8;
+  box-shadow: 0 24px 55px rgba(72, 63, 48, 0.17);
+}
+
+.c-hero::after {
+  content: "";
+  position: absolute;
+  right: -90px;
+  bottom: -160px;
+  width: 360px;
+  height: 360px;
+  border: 75px solid rgba(208, 236, 208, 0.12);
+  border-radius: 50%;
+}
+
+.c-hero h1 {
+  max-width: 760px;
+  margin: 12px 0 14px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(34px, 5vw, 62px);
+  line-height: 1.04;
+  letter-spacing: -0.045em;
+}
+
+.c-hero p {
+  max-width: 650px;
+  color: #cddcd4;
+  line-height: 1.65;
+}
+
+.c-hero-actions {
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  justify-content: flex-end;
+}
+
+.c-hero .primary-button {
+  background: #d8f2df;
+  color: #173e31;
+}
+
+.c-hero .quiet-button,
+.c-hero .chip-button {
+  background: rgba(255, 255, 255, 0.12);
+  color: white;
+}
+
+.c-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 18px;
+  margin: 34px 4px 17px;
+}
+
+.c-section-head h2 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 28px;
+}
+
+.c-canvas {
+  columns: 3 270px;
+  column-gap: 15px;
+}
+
+.c-card {
+  width: 100%;
+  break-inside: avoid;
+  display: inline-block;
+  margin: 0 0 15px;
+  padding: 22px;
+  border: 0;
+  border-radius: 20px;
+  background: #fffdf8;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 7px 18px rgba(77, 66, 47, 0.08);
+}
+
+.c-card:nth-child(3n + 2) {
+  background: #e3ead8;
+}
+
+.c-card:nth-child(3n + 3) {
+  background: #eadfd3;
+}
+
+.c-card h3 {
+  margin: 12px 0 10px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 21px;
+  line-height: 1.2;
+}
+
+.c-card p {
+  margin: 0 0 16px;
+  line-height: 1.55;
+}
+
+/* 快速记录浮窗：三个 variants 共享行为，但皮肤跟随当前方案。 */
+.capture-backdrop {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: grid;
+  place-items: start center;
+  padding: max(7vh, 42px) 18px 100px;
+  background: rgba(12, 18, 15, 0.36);
+  backdrop-filter: blur(8px);
+}
+
+.capture-window {
+  width: min(700px, 100%);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 22px;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+
+.variant-b .capture-window {
+  border-color: #4e5c54;
+  border-radius: 12px;
+  background: #1d231f;
+  color: #edf4ef;
+}
+
+.variant-c .capture-window {
+  border-radius: 30px 30px 12px 30px;
+  background: #fffdf7;
+  color: #2d2821;
+}
+
+.capture-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.variant-b .capture-head,
+.variant-b .capture-footer {
+  border-color: #39413c;
+}
+
+.capture-title-wrap {
+  min-width: 0;
+}
+
+.capture-title-wrap h2 {
+  margin: 2px 0 0;
+  overflow: hidden;
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capture-editor {
+  width: 100%;
+  min-height: 230px;
+  padding: 22px;
+  resize: vertical;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 17px;
+  line-height: 1.7;
+}
+
+.capture-editor:focus {
+  outline: none;
+}
+
+.capture-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.recording {
+  background: #b33b34 !important;
+  color: white !important;
+  animation: pulse 1.4s infinite;
+}
+
+@keyframes pulse {
+  50% {
+    box-shadow: 0 0 0 7px rgba(179, 59, 52, 0.14);
+  }
+}
+
+/* 元数据面板通过原生 dialog 保留键盘焦点约束。 */
+.meta-dialog {
+  width: min(520px, calc(100% - 28px));
+  padding: 0;
+  border: 0;
+  border-radius: 20px;
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+
+.meta-dialog::backdrop {
+  background: rgba(12, 18, 15, 0.47);
+  backdrop-filter: blur(4px);
+}
+
+.dialog-head,
+.dialog-body,
+.dialog-footer {
+  padding: 20px 22px;
+}
+
+.dialog-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+}
+
+.dialog-head h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.dialog-body {
+  display: grid;
+  gap: 18px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field label,
+.field-label {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.field input {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid #c9d3cd;
+  border-radius: 10px;
+}
+
+.field-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+}
+
+/* Prototype 专用控件，不属于任何候选设计。 */
+.prototype-switcher {
+  position: fixed;
+  z-index: 50;
+  left: 50%;
+  bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transform: translateX(-50%);
+  padding: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  background: #101412;
+  color: white;
+  box-shadow: 0 15px 38px rgba(0, 0, 0, 0.3);
+}
+
+.prototype-switcher button {
+  width: 38px;
+  height: 38px;
+  border: 0;
+  border-radius: 50%;
+  background: #2b322e;
+  color: white;
+  cursor: pointer;
+}
+
+.prototype-label {
+  min-width: 148px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.state-inspector {
+  position: fixed;
+  z-index: 45;
+  right: 18px;
+  bottom: 18px;
+}
+
+.state-inspector summary {
+  width: max-content;
+  margin-left: auto;
+  padding: 11px 14px;
+  border-radius: 999px;
+  background: #fff;
+  color: #17201d;
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.16);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.state-inspector pre {
+  width: min(430px, calc(100vw - 36px));
+  max-height: 48vh;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 16px;
+  border-radius: 14px;
+  background: #101412;
+  color: #c9f5dc;
+  box-shadow: var(--shadow);
+  font: 11px/1.5 "Cascadia Code", Consolas, monospace;
+}
+
+.toast {
+  position: fixed;
+  z-index: 60;
+  left: 50%;
+  top: 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  transform: translateX(-50%);
+  padding: 12px 14px 12px 18px;
+  border-radius: 13px;
+  background: #101412;
+  color: white;
+  box-shadow: var(--shadow);
+}
+
+.toast button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: #d4f8e5;
+  color: #123c2e;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.empty-state {
+  padding: 54px 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* 窄窗口统一转为单栏，同时保留各 variant 的视觉语言。 */
+@media (max-width: 900px) {
+  .a-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .a-list-panel,
+  .a-editor-panel {
+    min-height: auto;
+  }
+
+  .a-editor-panel {
+    min-height: 520px;
+  }
+
+  .b-layout {
+    grid-template-columns: 82px 1fr;
+  }
+
+  .b-logo {
+    font-size: 0;
+  }
+
+  .b-logo::after {
+    content: "Q";
+    font-size: 22px;
+  }
+
+  .b-nav button,
+  .b-shortcut {
+    overflow: hidden;
+    font-size: 0;
+    text-align: center;
+  }
+
+  .b-nav button::first-letter {
+    font-size: 16px;
+  }
+
+  .b-shortcut {
+    display: none;
+  }
+
+  .b-editor-panel {
+    grid-column: 2;
+    min-height: 500px;
+    border-top: 1px solid #303833;
+  }
+
+  .c-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .c-hero-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .a-header,
+  .c-topbar,
+  .editor-footer,
+  .b-action-rail {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .a-header .button-row,
+  .c-topbar .button-row {
+    width: 100%;
+  }
+
+  .a-header .button-row button,
+  .c-topbar .button-row button {
+    flex: 1;
+  }
+
+  .a-layout {
+    padding-inline: 12px;
+  }
+
+  .a-editor-panel {
+    padding: 20px;
+  }
+
+  .b-layout {
+    display: block;
+  }
+
+  .b-sidebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-right: 0;
+    border-bottom: 1px solid #303833;
+  }
+
+  .b-logo {
+    margin: 0;
+  }
+
+  .b-nav {
+    display: flex;
+  }
+
+  .b-nav button {
+    width: 40px;
+    padding: 0;
+  }
+
+  .b-editor-panel {
+    min-height: 470px;
+  }
+
+  .c-main {
+    padding-inline: 12px;
+  }
+
+  .c-hero {
+    padding: 28px 23px;
+    border-radius: 24px;
+  }
+
+  .c-canvas {
+    columns: 1;
+  }
+
+  .state-inspector {
+    right: 8px;
+    bottom: 72px;
+  }
+
+  .prototype-switcher {
+    bottom: 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
