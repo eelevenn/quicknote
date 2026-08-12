@@ -204,6 +204,23 @@ function closeCapture() {
   render({ focusReturn: true });
 }
 
+// 原型用关闭 overlay + 显式焦点/反馈模拟“激活并显示 App 主窗口”。
+function openMainWindow() {
+  if (state.draft && !state.draft.content.trim()) {
+    state.draft = null;
+  }
+  state.recording = false;
+  state.surface = "home";
+  render();
+  showToast("QuickNote 主窗口已打开");
+
+  const focusTarget = usesCompactCapture()
+    ? document.querySelector(`[data-note-id="${state.currentId}"]`)
+    : activeEditor();
+  focusTarget?.focus();
+  announce("QuickNote 主窗口已打开");
+}
+
 function openNote(noteId) {
   state.currentId = noteId;
   state.draft = null;
@@ -390,7 +407,7 @@ function editorTemplate(context) {
       : '<button class="danger-button" type="button" data-action="archive-current">归档</button>';
   const surfaceAction =
     context === "capture"
-      ? '<button class="quiet-button" type="button" data-action="close-capture">返回主页 <kbd>Esc</kbd></button>'
+      ? '<button class="primary-button" type="button" data-action="open-main-window">打开主窗口</button>'
       : context === "b"
         ? '<button class="primary-button" type="button" data-action="open-capture">快速记录</button>'
         : "";
@@ -552,7 +569,7 @@ function captureTemplate() {
             <p class="eyebrow">${state.draft ? "新便签 · 空白可取消" : "快速记录 · 当前便签"}</p>
             <h2 id="capture-title">${escapeHtml(noteTitle(note))}</h2>
           </div>
-          <button class="icon-button" type="button" data-action="close-capture" aria-label="关闭并返回主页">×</button>
+          <button class="icon-button" type="button" data-action="close-capture" aria-label="关闭快速记录">×</button>
         </header>
         ${editorTemplate("capture")}
       </div>
@@ -566,19 +583,19 @@ function metadataDialogTemplate() {
     <dialog class="meta-dialog" data-metadata-dialog aria-labelledby="metadata-title">
       <form method="dialog" data-metadata-form>
         <header class="dialog-head">
-          <h2 id="metadata-title">截止时间与提醒</h2>
+          <h2 id="metadata-title">提醒与截止时间</h2>
           <button class="icon-button" value="cancel" aria-label="关闭">×</button>
         </header>
         <div class="dialog-body">
           <div class="field">
-            <label for="due-at">截止时间</label>
-            <input id="due-at" name="dueAt" type="datetime-local" value="${escapeHtml(note?.dueAt || "")}" />
-            <p class="field-hint">首次设置截止时间时，会默认在同一时刻添加提醒。</p>
-          </div>
-          <div class="field">
             <label for="reminder-at">提醒</label>
             <input id="reminder-at" name="reminderAt" type="datetime-local" value="${escapeHtml(note?.reminderAt || "")}" />
             <p class="field-hint">提醒可以独立修改或清除；它不改变截止时间。</p>
+          </div>
+          <div class="field">
+            <label for="due-at">截止时间</label>
+            <input id="due-at" name="dueAt" type="datetime-local" value="${escapeHtml(note?.dueAt || "")}" />
+            <p class="field-hint">首次设置截止时间时，会默认在同一时刻添加提醒。</p>
           </div>
         </div>
         <footer class="dialog-footer">
@@ -753,6 +770,7 @@ function handleAction(event, action) {
     "open-capture": openCapture,
     "close-capture": closeCapture,
     "backdrop-close": closeCapture,
+    "open-main-window": openMainWindow,
     "new-note": startNewNote,
     "archive-current": archiveCurrent,
     "toggle-recording": toggleRecording,

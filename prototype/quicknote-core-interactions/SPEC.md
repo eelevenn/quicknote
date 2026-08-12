@@ -72,6 +72,8 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 50. As a single-column user, I want selecting a note to open quick capture, so that editing remains available when the persistent editor is hidden.
 51. As a QuickNote user, I want new-note creation at the lower-right of the note collection, so that the action is visually associated with the collection it changes.
 52. As a QuickNote user, I want reminder metadata shown before due metadata, so that the earlier intervention is read before the final deadline.
+53. As a QuickNote user, I want `Esc` and the close icon to close only quick capture, so that dismissal is not confused with main-window navigation.
+54. As a QuickNote user, I want an explicit `打开主窗口` action in quick capture, so that I can intentionally transition into the full application workspace.
 
 ## Implementation Decisions
 
@@ -81,8 +83,9 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 - Opening any active note from the home page changes the current note immediately; the next shortcut activation opens that same note in quick capture.
 - On wide layouts, selecting a note changes the current note and focuses the persistent editor without opening quick capture. On single-column layouts where the persistent editor is hidden, the same selection opens quick capture.
 - Quick capture is reserved for shortcut activation and layouts without a persistent editor. The wide home-page editor does not repeat a `快速记录` action.
+- `Esc`, clicking outside, and the close icon dismiss quick capture without claiming to navigate anywhere. The quick-capture footer instead offers an explicit `打开主窗口` action that activates and shows the App main window focused on the current note.
 - New-note creation is located at the lower-right of the note collection. It opens an uncommitted draft in the persistent editor on wide layouts and in quick capture on single-column layouts.
-- When both reminder and due metadata are present, reminder is displayed before due time.
+- Reminder precedes due time in both metadata summaries and the time editor; the dialog title follows the same `提醒与截止时间` order.
 - The first quick-capture focus goes to the editor with the caret at the content end. Renders caused by autosave feedback preserve the user's current selection.
 - New-note creation begins as an uncommitted in-memory draft. The draft joins the note collection and becomes current only after non-blank input; closing an untouched draft discards it without trace.
 - Autosave is the only save interaction. The UI exposes transient `正在保存…` and settled `已自动保存` feedback without a save button.
@@ -104,6 +107,8 @@ QuickNote 的核心心智模型横跨两个 surface：用户在快速记录浮�
 - Test the current-note journey: quick capture opens the current note, focuses the editor at the end, home-page selection changes current immediately, and the next quick capture opens that selected note.
 - Test both responsive selection paths: a wide home page changes and focuses the persistent editor without a floating window, while a single-column home page opens quick capture for the selected note.
 - Test that the shortcut always opens quick capture at both wide and narrow widths, and that the wide persistent editor has no duplicate `快速记录` action.
+- Test that `Esc` and the close icon only dismiss quick capture, while `打开主窗口` invokes the main-window activation boundary and focuses the current note.
+- Test that the time editor presents reminder before due time while preserving the default linkage and independent reminder editing.
 - Test new-note lifecycle: an untouched draft cancels without creating a note; the first non-blank input creates it and makes it current; the former current note is unchanged.
 - Test autosave by observing settled visible feedback and re-reading through the application's public note surface after the persistence design exists. Do not test debounce timers or private storage calls directly.
 - Test archive behavior through the home page: the note disappears from active notes, future reminder presentation is absent, undo restores it, and archived browsing plus restore returns it as current.
