@@ -1,81 +1,59 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod platform;
+
 use quicknote_benchmark_support::{
-    BenchmarkStatus, PipeRequest, SharedStatus, acquire_single_instance, start_global_hotkey,
-    start_pipe_server,
+    BenchmarkStatus, HotkeyController, PipeRequest, PowerResumeController, SharedStatus,
+    acquire_single_instance, send_pipe_request, start_pipe_server, start_power_resume_listener,
+    start_rebindable_global_hotkey,
 };
-use rusqlite::{Connection, params};
+use quicknote_stack_slint::{BenchmarkWindow, core::ActivationCommand, store::Store};
 use slint::{ComponentHandle, SharedString, Timer, TimerMode, Weak};
 use std::cell::RefCell;
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tray_icon::{
     Icon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem},
 };
 
-slint::include_modules!();
-
-struct Store {
-    connection: Mutex<Connection>,
-}
-
-impl Store {
-    fn open() -> Result<Self, Box<dyn std::error::Error>> {
-        let data_directory = std::env::var_os("QUICKNOTE_BENCH_DATA_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::temp_dir()
-                    .join("QuickNoteStackBenchmark")
-                    .join("slint")
-            });
-        fs::create_dir_all(&data_directory)?;
-        let connection = Connection::open(data_directory.join("quicknote.db"))?;
-        connection.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY CHECK (id = 1), body TEXT NOT NULL, updated_at TEXT NOT NULL);",
-        )?;
-        let count: i64 =
-            connection.query_row("SELECT COUNT(*) FROM notes WHERE id = 1", [], |row| {
-                row.get(0)
-            })?;
-        if count == 0 {
-            connection.execute(
-                "INSERT INTO notes (id, body, updated_at) VALUES (1, ?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-                params![build_seed(std::env::var_os("QUICKNOTE_BENCH_FIXTURE").as_deref())],
-            )?;
-        }
-        Ok(Self {
-            connection: Mutex::new(connection),
-        })
-    }
-
-    fn load(&self) -> Result<String, rusqlite::Error> {
-        self.connection
-            .lock()
-            .expect("Slint SQLite mutex poisoned")
-            .query_row("SELECT body FROM notes WHERE id = 1", [], |row| row.get(0))
-    }
-
-    fn save(&self, body: &str) -> Result<(), rusqlite::Error> {
-        let mut connection = self.connection.lock().expect("Slint SQLite mutex poisoned");
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO notes (id, body, updated_at) VALUES (1, ?1, strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(id) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at",
-            params![body],
-        )?;
-        transaction.commit()
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // A second launch exits cleanly while the first instance retains the global hotkey.
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.iter().any(|argument| argument == "--register") {
+        platform::register_current_executable()?;
+        return Ok(());
+    }
+    if arguments.iter().any(|argument| argument == "--unregister") {
+        platform::unregister()?;
+        return Ok(());
+    }
+    platform::set_current_process_identity()?;
+
+    let activation = arguments
+        .iter()
+        .find(|argument| argument.starts_with("quicknote-spike://"))
+        .map(|argument| ActivationCommand::parse(argument))
+        .transpose()?;
+
+    // A second launch forwards its activation to the existing instance.
     let _single_instance = match acquire_single_instance("slint") {
         Ok(guard) => guard,
-        Err(_) => return Ok(()),
+        Err(_) => {
+            if let Some(command) = activation {
+                let _ = send_pipe_request(
+                    "slint",
+                    &PipeRequest {
+                        id: Some("activation-forward".to_owned()),
+                        command: Some("activate".to_owned()),
+                        value: Some(command.as_uri()),
+                    },
+                );
+            }
+            return Ok(());
+        }
     };
+
     let store = Arc::new(Store::open()?);
     let status = SharedStatus::new("slint");
     let window = BenchmarkWindow::new()?;
@@ -103,23 +81,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let weak = window.as_weak();
     let hotkey_status = status.clone();
-    start_global_hotkey(status.clone(), move || {
-        schedule_show(weak.clone(), hotkey_status.clone())
-    });
+    let hotkey = Arc::new(start_rebindable_global_hotkey(
+        status.clone(),
+        "Ctrl+Alt+Q",
+        move || schedule_show(weak.clone(), hotkey_status.clone()),
+    ));
+    hotkey.wait_until_ready();
+
+    let power_store = store.clone();
+    let power_status = status.clone();
+    let power = start_power_resume_listener(move || scan_overdue(&power_store, &power_status))?;
+
+    {
+        let store = store.clone();
+        let weak = window.as_weak();
+        window.on_schedule_reminder(move || {
+            let message = match store.schedule_test_reminder(10) {
+                Ok(reminder) => match platform::schedule_reminder(&reminder) {
+                    Ok(()) => format!("测试提醒已安排：10 秒后，ID {}", reminder.id),
+                    Err(error) => format!("计划通知失败：{error}"),
+                },
+                Err(error) => format!("保存提醒失败：{error}"),
+            };
+            if let Some(window) = weak.upgrade() {
+                window.set_status_text(message.into());
+            }
+        });
+    }
+
+    {
+        let hotkey = hotkey.clone();
+        let weak = window.as_weak();
+        window.on_rebind_hotkey(move || {
+            let message = match hotkey.rebind("Ctrl+Shift+Q") {
+                Ok(()) => "正在切换为 Ctrl+Shift+Q".to_owned(),
+                Err(error) => format!("快捷键切换失败：{error}"),
+            };
+            if let Some(window) = weak.upgrade() {
+                window.set_status_text(message.into());
+            }
+        });
+    }
 
     let pipe_weak = window.as_weak();
     let pipe_status = status.clone();
     let pipe_store = store.clone();
+    let pipe_hotkey = hotkey.clone();
+    let pipe_power = power.clone();
     start_pipe_server("slint", move |request| {
         handle_pipe(
             pipe_weak.clone(),
             pipe_status.clone(),
             pipe_store.clone(),
+            pipe_hotkey.clone(),
+            pipe_power.clone(),
             request,
         )
     });
 
-    // Keep tray resources alive for the duration of the event loop.
+    // Keep tray resources alive for the duration of the event loop. tray-icon handles
+    // TaskbarCreated and re-registers after Explorer restarts.
     let menu = Menu::new();
     let show_item = MenuItem::new("显示", true, None);
     let exit_item = MenuItem::new("退出", true, None);
@@ -129,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let icon = benchmark_icon()?;
     let _tray = TrayIconBuilder::new()
         .with_icon(icon)
-        .with_tooltip("QuickNote Slint benchmark")
+        .with_tooltip("QuickNote Slint integration spike")
         .with_menu(Box::new(menu))
         .build()?;
     let tray_window = window.as_weak();
@@ -147,9 +168,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Startup only initializes state; resume owns missed-reminder detection so a delivered
+    // toast remains present in Windows notification history while the app is exited.
+
     window.show()?;
     status.mark_visible();
     mark_editor_ready(&window, &status);
+    if let Some(command) = activation {
+        apply_activation(&store, &status, &window.as_weak(), &command);
+    }
     slint::run_event_loop_until_quit()?;
 
     save_timer.stop();
@@ -178,22 +205,127 @@ fn mark_editor_ready(window: &BenchmarkWindow, status: &SharedStatus) {
     status.mark_ready();
 }
 
+fn apply_activation(
+    store: &Arc<Store>,
+    status: &SharedStatus,
+    window: &Weak<BenchmarkWindow>,
+    command: &ActivationCommand,
+) {
+    let result = store.apply_activation(command);
+    status.mark_activation(&command.as_uri());
+    let message = match result {
+        Ok(true) => {
+            // Keep the OS scheduler a projection of the SQLite reminder fact source.
+            let platform_result: Result<(), String> = match command {
+                ActivationCommand::Snooze { reminder_id, .. } => {
+                    match store.reminder(*reminder_id) {
+                        Ok(Some(reminder)) => platform::schedule_reminder(&reminder)
+                            .map_err(|error| error.to_string()),
+                        Ok(None) => Err("稍后提醒对应的领域记录不存在。".to_owned()),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+                ActivationCommand::Archive { reminder_id, .. } => {
+                    platform::cancel_reminder(*reminder_id).map_err(|error| error.to_string())
+                }
+                ActivationCommand::Open { .. } => Ok(()),
+            };
+            match platform_result {
+                Ok(()) => format!("已应用通知动作：{}", command.as_uri()),
+                Err(error) => format!("通知动作已保存，但平台同步失败：{error}"),
+            }
+        }
+        Ok(false) => format!("重复通知动作已忽略：{}", command.as_uri()),
+        Err(error) => format!("通知动作失败：{error}"),
+    };
+    if let Some(window) = window.upgrade() {
+        window.set_status_text(message.into());
+        if matches!(command, ActivationCommand::Open { .. }) {
+            let _ = window.show();
+            mark_editor_ready(&window, status);
+        }
+    }
+}
+
+fn scan_overdue(store: &Arc<Store>, status: &SharedStatus) {
+    status.mark_resume_scan();
+    // ADR-0001 treats a missed reminder as local state and forbids toast catch-up.
+    let _ = store.scan_overdue_once();
+}
+
 fn handle_pipe(
     window: Weak<BenchmarkWindow>,
     status: SharedStatus,
     store: Arc<Store>,
+    hotkey: Arc<HotkeyController>,
+    power: PowerResumeController,
     request: PipeRequest,
 ) -> BenchmarkStatus {
     let command = request.command.as_deref().unwrap_or("status");
+    let mut error = None;
     match command {
         "show" | "insert-sentinel" => schedule_show(window, status.clone()),
         "hide" => {
+            let hide_store = store.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(window) = window.upgrade() {
-                    let _ = store.save(window.get_note_text().as_str());
+                    let _ = hide_store.save(window.get_note_text().as_str());
                     let _ = window.hide();
                 }
             });
+        }
+        "activate" => match request.value.as_deref().map(ActivationCommand::parse) {
+            Some(Ok(activation)) => {
+                let window_clone = window.clone();
+                let status_clone = status.clone();
+                let store_clone = store.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    apply_activation(&store_clone, &status_clone, &window_clone, &activation)
+                });
+            }
+            Some(Err(message)) => error = Some(message),
+            None => error = Some("Activation URI is missing.".to_owned()),
+        },
+        "schedule-reminder" => {
+            let delay = request
+                .value
+                .as_deref()
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(10);
+            match store.schedule_test_reminder(delay) {
+                Ok(reminder) => {
+                    if let Err(platform_error) = platform::schedule_reminder(&reminder) {
+                        error = Some(platform_error.to_string());
+                    }
+                }
+                Err(store_error) => error = Some(store_error.to_string()),
+            }
+        }
+        "scheduled-count" => {
+            if let Err(platform_error) = platform::scheduled_count() {
+                error = Some(platform_error.to_string());
+            }
+        }
+        "history-count" => {
+            if let Err(platform_error) = platform::history_count() {
+                error = Some(platform_error.to_string());
+            }
+        }
+        "clear-history" => {
+            if let Err(platform_error) = platform::clear_history() {
+                error = Some(platform_error.to_string());
+            }
+        }
+        "simulate-resume" => {
+            if let Err(power_error) = power.simulate_resume() {
+                error = Some(power_error);
+            }
+        }
+        "rebind-hotkey" => {
+            let spec = request.value.as_deref().unwrap_or("Ctrl+Shift+Q");
+            if let Err(hotkey_error) = hotkey.rebind(spec) {
+                error = Some(hotkey_error);
+            }
         }
         "shutdown" => {
             let _ = slint::invoke_from_event_loop(move || {
@@ -204,34 +336,33 @@ fn handle_pipe(
             });
         }
         "status" => {}
-        _ => {
-            let mut response = status.snapshot(request.id, "error");
-            response.ok = false;
-            response.error = Some(format!("Unknown command: {command}"));
-            return response;
-        }
+        _ => error = Some(format!("Unknown command: {command}")),
     }
-    status.snapshot(
+    let mut response = status.snapshot(
         request.id,
         if command == "status" {
             "status"
         } else {
             "editor-focused"
         },
-    )
-}
-
-fn build_seed(fixture: Option<&std::ffi::OsStr>) -> String {
-    let source = fixture
-        .map(Path::new)
-        .and_then(|path| fs::read_to_string(path).ok())
-        .unwrap_or_else(|| "QuickNote benchmark fixture · 中文输入 · SQLite autosave\n".to_owned());
-    let mut seed = source.clone();
-    while seed.len() < 8 * 1024 {
-        seed.push('\n');
-        seed.push_str(&source);
+    );
+    if let Some(message) = error {
+        response.ok = false;
+        response.error = Some(message);
     }
-    seed
+    if let Ok(count) = platform::scheduled_count() {
+        response.scheduled_notification_count = Some(count);
+    }
+    if let Ok(count) = platform::history_count() {
+        response.notification_history_count = Some(count);
+    }
+    if let Ok(Some(reminder)) = store.reminder(1) {
+        response.reminder_status = Some(reminder.status);
+        response.reminder_due_at = Some(reminder.due_at);
+        response.reminder_catch_up_at = reminder.catch_up_at;
+        response.reminder_last_action = reminder.last_action;
+    }
+    response
 }
 
 fn benchmark_icon() -> Result<Icon, tray_icon::BadIcon> {

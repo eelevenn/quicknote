@@ -1,0 +1,41 @@
+﻿{
+    "capturedAt":  "2026-08-13T22:10:56.3291924+08:00",
+    "status":  "passed",
+    "note":  "The resume and Explorer gates exercise their native Windows messages without suspending the workstation or terminating Explorer. Resume only marks missed-reminder state and never emits a catch-up toast, per ADR-0001.",
+    "gates":  [
+                  {
+                      "name":  "installer",
+                      "status":  "passed",
+                      "installerBytes":  5005312,
+                      "installedBytes":  11168968
+                  },
+                  {
+                      "name":  "hotkey-conflict-recovery",
+                      "status":  "passed",
+                      "error":  "RegisterHotKey failed: 1409"
+                  },
+                  {
+                      "name":  "scheduled-toast-and-cold-activation",
+                      "status":  "passed",
+                      "historyCount":  1,
+                      "uri":  "quicknote-spike://open?note=1\u0026reminder=1\u0026delivery=1786630251"
+                  },
+                  {
+                      "name":  "notification-action-idempotence",
+                      "status":  "passed",
+                      "activationCount":  4,
+                      "scheduledAfterArchive":  0
+                  },
+                  {
+                      "name":  "resume-idempotence",
+                      "status":  "passed",
+                      "catchUpAt":  1786630255,
+                      "resumeScanCount":  2
+                  },
+                  {
+                      "name":  "explorer-recovery-signal",
+                      "status":  "passed",
+                      "processId":  30360
+                  }
+              ]
+}

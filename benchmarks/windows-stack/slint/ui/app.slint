@@ -1,4 +1,4 @@
-import { VerticalBox, TextEdit } from "std-widgets.slint";
+import { AboutSlint, Button, HorizontalBox, TextEdit, VerticalBox } from "std-widgets.slint";
 
 export component BenchmarkWindow inherits Window {
     title: "QuickNote · Slint benchmark";
@@ -6,7 +6,10 @@ export component BenchmarkWindow inherits Window {
     height: 480px;
     background: #f7f4ee;
     in-out property <string> note-text;
+    in property <string> status-text: "Windows 集成 spike 已就绪";
     callback note-edited(string);
+    callback schedule-reminder();
+    callback rebind-hotkey();
 
     VerticalBox {
         padding: 24px;
@@ -23,13 +26,39 @@ export component BenchmarkWindow inherits Window {
             text <=> root.note-text;
             wrap: word-wrap;
             font-size: 15px;
+            accessible-label: "当前便签正文";
+            accessible-description: "支持中文输入、粘贴以及撤销和重做";
             edited => { root.note-edited(self.text); }
         }
 
+        HorizontalBox {
+            spacing: 8px;
+            Button {
+                text: "安排测试提醒";
+                clicked => { root.schedule-reminder(); }
+            }
+            Button {
+                text: "切换备用快捷键";
+                clicked => { root.rebind-hotkey(); }
+            }
+        }
+
         Text {
-            text: "Ctrl+Alt+Q 呼出 · 250 ms 自动保存 · benchmark prototype";
+            text: root.status-text;
+            font-size: 12px;
+            color: #3d6b55;
+            accessible-role: text;
+            accessible-label: root.status-text;
+        }
+
+        Text {
+            text: "Ctrl+Alt+Q 呼出 · 250 ms 自动保存 · Windows integration spike";
             font-size: 12px;
             color: #665d54;
+        }
+
+        AboutSlint {
+            preferred-height: 62px;
         }
     }
 

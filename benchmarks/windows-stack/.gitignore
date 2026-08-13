@@ -9,3 +9,7 @@ results/*/
 !results/.gitkeep
 !results/20260813-exploratory/
 !results/20260813-exploratory/**
+!results/20260813-slint-spike/
+!results/20260813-slint-spike/**
+!results/20260813-221106/
+!results/20260813-221106/**

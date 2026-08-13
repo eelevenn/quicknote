@@ -5,10 +5,43 @@ edition = "2024"
 publish = false
 
 [dependencies]
-quicknote-benchmark-support = { path = "../rust-support" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-slint = { version = "1.17.1", default-features = false, features = ["backend-winit", "renderer-software", "std", "compat-1-2"] }
-tray-icon = "0.24.2"
+serde = { version = "1", features = ["derive"] }
+slint = { version = "1.17.1", default-features = false, features = ["renderer-software", "std", "compat-1-2"] }
+url = "2.5"
+
+[target.'cfg(windows)'.dependencies]
+quicknote-benchmark-support = { path = "../rust-support", optional = true }
+tray-icon = { version = "0.24.2", optional = true }
+windows = { version = "0.62.2", optional = true, features = [
+    "Data_Xml_Dom",
+    "Foundation",
+    "UI_Notifications",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+winreg = { version = "0.56.0", optional = true }
+
+[[bin]]
+name = "quicknote-stack-slint"
+path = "src/main.rs"
+required-features = ["desktop-windows"]
+
+[features]
+default = ["desktop-windows"]
+# Mobile builds omit the Windows shell adapter while retaining shared core and UI modules.
+desktop-windows = [
+    "dep:quicknote-benchmark-support",
+    "dep:tray-icon",
+    "dep:windows",
+    "dep:winreg",
+    "slint/accessibility",
+    "slint/backend-winit",
+]
 
 [build-dependencies]
 slint-build = "1.17.1"

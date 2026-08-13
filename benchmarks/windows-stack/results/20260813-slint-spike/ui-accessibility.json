@@ -1,0 +1,57 @@
+﻿{
+    "capturedAt":  "2026-08-13T22:14:23.5698209+08:00",
+    "status":  "passed",
+    "scaleFactor":  1.5,
+    "originalLength":  7079,
+    "finalText":  "中文输入法验证 · IME caret · 粘贴验证",
+    "elements":  [
+                     {
+                         "type":  "ControlType.Text",
+                         "name":  "当前便签",
+                         "help":  "",
+                         "keyboardFocusable":  false
+                     },
+                     {
+                         "type":  "ControlType.Edit",
+                         "name":  "当前便签正文",
+                         "help":  "",
+                         "keyboardFocusable":  true
+                     },
+                     {
+                         "type":  "ControlType.Button",
+                         "name":  "安排测试提醒",
+                         "help":  "",
+                         "keyboardFocusable":  true
+                     },
+                     {
+                         "type":  "ControlType.Button",
+                         "name":  "切换备用快捷键",
+                         "help":  "",
+                         "keyboardFocusable":  true
+                     },
+                     {
+                         "type":  "ControlType.Text",
+                         "name":  "Windows 集成 spike 已就绪",
+                         "help":  "",
+                         "keyboardFocusable":  false
+                     },
+                     {
+                         "type":  "ControlType.Text",
+                         "name":  "Ctrl+Alt+Q 呼出 · 250 ms 自动保存 · Windows integration spike",
+                         "help":  "",
+                         "keyboardFocusable":  false
+                     },
+                     {
+                         "type":  "ControlType.Image",
+                         "name":  "#MadeWithSlint",
+                         "help":  "",
+                         "keyboardFocusable":  false
+                     },
+                     {
+                         "type":  "ControlType.Text",
+                         "name":  "Version 1.17.1\nhttps://slint.dev/",
+                         "help":  "",
+                         "keyboardFocusable":  false
+                     }
+                 ]
+}

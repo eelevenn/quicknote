@@ -1,0 +1,20 @@
+﻿{
+    "status":  "complete",
+    "interpretation":  "Exploratory only; reference lines are not pass/fail gates.",
+    "coldSamplesRequested":  20,
+    "hotSamplesRequested":  50,
+    "candidates":  [
+                       {
+                           "candidate":  "slint",
+                           "status":  "measured",
+                           "coldP50Ms":  151.9076,
+                           "coldP95Ms":  167.0654,
+                           "hotP50Ms":  41.0675,
+                           "hotP95Ms":  43.5978,
+                           "idlePrivateWorkingSetP50Bytes":  7188480,
+                           "idlePrivateWorkingSetP95Bytes":  7188480,
+                           "releaseDirectoryBytes":  11168256,
+                           "failureCount":  0
+                       }
+                   ]
+}
