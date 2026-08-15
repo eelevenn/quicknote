@@ -1,0 +1,131 @@
+import { AboutSlint, Button, HorizontalBox, TextEdit, VerticalBox } from "std-widgets.slint";
+
+// Issue #17 只建立生产窗口和生命周期骨架，完整主页在后续纵向切片实现。
+export component MainWindow inherits Window {
+    title: "QuickNote";
+    width: 760px;
+    height: 520px;
+    background: #f7f4ee;
+
+    in property <string> status-text: "应用模块已就绪";
+    in property <int> schema-version: 0;
+    in property <int> active-note-count: 0;
+    callback open-quick-capture();
+    callback exit-requested();
+
+    VerticalBox {
+        padding: 28px;
+        spacing: 16px;
+
+        Text {
+            text: "QuickNote";
+            font-size: 28px;
+            font-weight: 700;
+            color: #211d19;
+            accessible-label: "QuickNote 主页";
+        }
+
+        Text {
+            text: "生产工程骨架";
+            font-size: 16px;
+            color: #665d54;
+        }
+
+        Rectangle {
+            background: #fffaf3;
+            border-color: #ded4c7;
+            border-width: 1px;
+            border-radius: 10px;
+            height: 140px;
+
+            VerticalBox {
+                padding: 18px;
+                spacing: 8px;
+                Text {
+                    text: root.status-text;
+                    font-size: 15px;
+                    color: #2f5f49;
+                    accessible-label: root.status-text;
+                }
+                Text {
+                    text: "Schema v" + root.schema-version + " · 活跃便签 " + root.active-note-count;
+                    font-size: 13px;
+                    color: #665d54;
+                }
+                Text {
+                    text: "主页内容、搜索与生命周期将在后续纵向切片接入。";
+                    font-size: 13px;
+                    color: #665d54;
+                }
+            }
+        }
+
+        HorizontalBox {
+            spacing: 10px;
+            Button {
+                text: "打开快速记录";
+                clicked => { root.open-quick-capture(); }
+            }
+            Button {
+                text: "退出";
+                clicked => { root.exit-requested(); }
+            }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        // Royalty-free License 要求保留可见的 Slint attribution。
+        AboutSlint {
+            preferred-height: 62px;
+        }
+    }
+}
+
+// 快速记录窗暂存文本但不写数据库，避免提前实现 Issue #18 的自动保存。
+export component QuickCaptureWindow inherits Window {
+    title: "QuickNote · 快速记录";
+    width: 560px;
+    height: 340px;
+    background: #fffaf3;
+
+    in-out property <string> draft-text;
+    callback dismissed();
+    callback open-main();
+
+    VerticalBox {
+        padding: 22px;
+        spacing: 12px;
+
+        Text {
+            text: "快速记录";
+            font-size: 20px;
+            font-weight: 650;
+            color: #211d19;
+            accessible-label: "快速记录";
+        }
+
+        editor := TextEdit {
+            text <=> root.draft-text;
+            wrap: word-wrap;
+            font-size: 15px;
+            accessible-label: "快速记录正文";
+            accessible-description: "Issue 18 将接入当前便签与自动保存";
+        }
+
+        HorizontalBox {
+            spacing: 10px;
+            Button {
+                text: "关闭";
+                clicked => { root.dismissed(); }
+            }
+            Button {
+                text: "打开主窗口";
+                clicked => { root.open-main(); }
+            }
+        }
+    }
+
+    public function focus-editor() {
+        editor.focus();
+    }
+}

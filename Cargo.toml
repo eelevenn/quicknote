@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "apps/quicknote-windows",
+    "crates/quicknote-app",
+    "crates/quicknote-ui",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# Slint 1.17.1 的最低 Rust 版本为 1.92。
+rust-version = "1.92"
+license = "Proprietary"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+panic = "abort"
+strip = "symbols"
