@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 /// 应用模块向 UI 和测试公开的稳定错误分类。
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ApplicationError {
     /// 调用方提交了不满足领域规则的命令。
     #[error("命令无效：{message}")]
@@ -64,6 +64,15 @@ pub enum ApplicationError {
         /// 通道或后台线程错误说明。
         message: String,
     },
+
+    /// 平台 adapter 拒绝操作；快捷键冲突属于可恢复错误。
+    #[error("平台操作 {operation} 失败：{message}")]
+    Platform {
+        /// 失败的逻辑操作名。
+        operation: &'static str,
+        /// 不包含 Win32 类型的可展示说明。
+        message: String,
+    },
 }
 
 impl ApplicationError {
@@ -72,6 +81,14 @@ impl ApplicationError {
         Self::Storage {
             operation,
             message: error.to_string(),
+        }
+    }
+
+    /// 将平台 adapter 错误折叠为应用接口的稳定错误。
+    pub(crate) fn platform(error: crate::platform::PlatformError) -> Self {
+        Self::Platform {
+            operation: error.operation,
+            message: error.message,
         }
     }
 }

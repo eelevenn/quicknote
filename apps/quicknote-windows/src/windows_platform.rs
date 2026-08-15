@@ -1,14 +1,15 @@
 //! `PlatformServices` 的 Windows 11 adapter。
 
 use quicknote_app::platform::{
-    ActivationHandler, ActivationRequest, InstanceLease, InstanceRole, PRODUCT_IDENTITY,
-    PlatformCommand, PlatformError, PlatformServices,
+    ActivationHandler, ActivationRequest, GlobalShortcut, InstanceLease, InstanceRole,
+    PRODUCT_IDENTITY, PlatformCommand, PlatformError, PlatformServices, ShortcutKey,
 };
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    GetLastError, HANDLE, INVALID_HANDLE_VALUE, LPARAM, WPARAM,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_MODE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
@@ -19,23 +20,42 @@ use windows::Win32::System::Pipes::{
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     WaitNamedPipeW,
 };
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
+    UnregisterHotKey,
+};
 use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, WM_APP, WM_HOTKEY,
+};
 use windows::core::{HSTRING, PCWSTR};
 
 const MUTEX_NAME: &str = "Local\\eelevenn.QuickNote.SingleInstance.v1";
 const PIPE_NAME: &str = r"\\.\pipe\eelevenn.quicknote.activation.v1";
 const SHUTDOWN_MESSAGE: &[u8] = b"__quicknote_shutdown__";
 const MAX_ACTIVATION_BYTES: usize = 64 * 1024;
+const HOTKEY_CONTROL_MESSAGE: u32 = WM_APP + 17;
+const HOTKEY_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// 使用稳定 AUMID、协议和本地数据目录的生产 Windows adapter。
-#[derive(Clone, Copy, Debug, Default)]
-pub struct WindowsPlatformServices;
+#[derive(Clone)]
+pub struct WindowsPlatformServices {
+    state: Arc<WindowsPlatformState>,
+}
+
+#[derive(Default)]
+struct WindowsPlatformState {
+    activation_handler: Mutex<Option<ActivationHandler>>,
+    hotkey_thread: Mutex<Option<HotkeyThread>>,
+}
 
 impl WindowsPlatformServices {
     /// 创建无进程内状态的 adapter。
     pub fn new() -> Self {
-        Self
+        Self {
+            state: Arc::new(WindowsPlatformState::default()),
+        }
     }
 
     /// 在创建窗口前设置通知与任务栏共同使用的稳定 AUMID。
@@ -44,6 +64,45 @@ impl WindowsPlatformServices {
         // SAFETY: HSTRING 在同步 Shell 调用期间保持有效。
         unsafe { SetCurrentProcessExplicitAppUserModelID(PCWSTR(aumid.as_ptr())) }
             .map_err(|error| PlatformError::new("set_process_aumid", error.to_string()))
+    }
+
+    fn replace_global_shortcut(&self, shortcut: GlobalShortcut) -> Result<(), PlatformError> {
+        let handler = self
+            .state
+            .activation_handler
+            .lock()
+            .map_err(|error| PlatformError::new("read_activation_handler", error.to_string()))?
+            .clone()
+            .ok_or_else(|| {
+                PlatformError::new("register_global_shortcut", "主实例激活处理器尚未就绪")
+            })?;
+        let mut hotkey = self
+            .state
+            .hotkey_thread
+            .lock()
+            .map_err(|error| PlatformError::new("lock_global_shortcut", error.to_string()))?;
+        if hotkey.is_none() {
+            *hotkey = Some(HotkeyThread::start(handler)?);
+        }
+        hotkey.as_ref().expect("快捷键线程已创建").replace(shortcut)
+    }
+
+    fn clear_global_shortcut(&self) -> Result<(), PlatformError> {
+        let hotkey = self
+            .state
+            .hotkey_thread
+            .lock()
+            .map_err(|error| PlatformError::new("lock_global_shortcut", error.to_string()))?;
+        if let Some(hotkey) = hotkey.as_ref() {
+            hotkey.clear()?;
+        }
+        Ok(())
+    }
+}
+
+impl Default for WindowsPlatformServices {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -74,6 +133,13 @@ impl PlatformServices for WindowsPlatformServices {
             return Ok(InstanceRole::SecondaryForwarded);
         }
 
+        *self
+            .state
+            .activation_handler
+            .lock()
+            .map_err(|error| PlatformError::new("store_activation_handler", error.to_string()))? =
+            Some(on_activation.clone());
+
         let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
         let listener = thread::Builder::new()
             .name("quicknote-activation-pipe".to_owned())
@@ -96,11 +162,249 @@ impl PlatformServices for WindowsPlatformServices {
     }
 
     fn apply(&self, command: PlatformCommand) -> Result<(), PlatformError> {
-        // #17 只建立 seam；具体快捷键、通知、托盘和自启动在对应纵向切片实现。
-        Err(PlatformError::new(
-            "apply_platform_command",
-            format!("平台命令尚未接入生产实现：{command:?}"),
-        ))
+        match command {
+            PlatformCommand::SetGlobalShortcut { shortcut } => {
+                self.replace_global_shortcut(shortcut)
+            }
+            PlatformCommand::ClearGlobalShortcut => self.clear_global_shortcut(),
+            // 提醒、托盘和自启动仍由各自后续纵向切片实现。
+            other => Err(PlatformError::new(
+                "apply_platform_command",
+                format!("平台命令尚未接入生产实现：{other:?}"),
+            )),
+        }
+    }
+}
+
+struct HotkeyThread {
+    commands: mpsc::Sender<HotkeyCommand>,
+    thread_id: u32,
+    worker: Option<JoinHandle<()>>,
+}
+
+enum HotkeyCommand {
+    Replace {
+        shortcut: GlobalShortcut,
+        respond_to: mpsc::Sender<Result<(), PlatformError>>,
+    },
+    Clear {
+        respond_to: mpsc::Sender<Result<(), PlatformError>>,
+    },
+    Shutdown,
+}
+
+#[derive(Clone, Copy)]
+struct RegisteredHotkey {
+    id: i32,
+    shortcut: GlobalShortcut,
+}
+
+impl HotkeyThread {
+    fn start(handler: ActivationHandler) -> Result<Self, PlatformError> {
+        let (commands, receiver) = mpsc::channel();
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("quicknote-global-hotkey".to_owned())
+            .spawn(move || {
+                // PeekMessageW 强制创建线程消息队列，之后 PostThreadMessageW 才可靠。
+                let thread_id = unsafe { GetCurrentThreadId() };
+                let mut message = MSG::default();
+                // SAFETY: message 在同步调用期间有效，空 HWND 表示当前线程队列。
+                let _ = unsafe { PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE) };
+                let _ = ready_sender.send(thread_id);
+                run_hotkey_loop(receiver, handler);
+            })
+            .map_err(|error| PlatformError::new("start_global_hotkey", error.to_string()))?;
+        let thread_id = ready_receiver
+            .recv_timeout(HOTKEY_RESPONSE_TIMEOUT)
+            .map_err(|error| PlatformError::new("start_global_hotkey", error.to_string()))?;
+        Ok(Self {
+            commands,
+            thread_id,
+            worker: Some(worker),
+        })
+    }
+
+    fn replace(&self, shortcut: GlobalShortcut) -> Result<(), PlatformError> {
+        let (respond_to, response) = mpsc::channel();
+        self.send(HotkeyCommand::Replace {
+            shortcut,
+            respond_to,
+        })?;
+        response
+            .recv_timeout(HOTKEY_RESPONSE_TIMEOUT)
+            .map_err(|error| PlatformError::new("register_global_shortcut", error.to_string()))?
+    }
+
+    fn clear(&self) -> Result<(), PlatformError> {
+        let (respond_to, response) = mpsc::channel();
+        self.send(HotkeyCommand::Clear { respond_to })?;
+        response
+            .recv_timeout(HOTKEY_RESPONSE_TIMEOUT)
+            .map_err(|error| PlatformError::new("clear_global_shortcut", error.to_string()))?
+    }
+
+    fn send(&self, command: HotkeyCommand) -> Result<(), PlatformError> {
+        self.commands
+            .send(command)
+            .map_err(|error| PlatformError::new("send_global_hotkey_command", error.to_string()))?;
+        // SAFETY: thread_id 来自仍由 self.worker 保活的消息循环线程。
+        unsafe { PostThreadMessageW(self.thread_id, HOTKEY_CONTROL_MESSAGE, WPARAM(0), LPARAM(0)) }
+            .map_err(|error| PlatformError::new("wake_global_hotkey_thread", error.to_string()))
+    }
+}
+
+impl Drop for HotkeyThread {
+    fn drop(&mut self) {
+        let _ = self.commands.send(HotkeyCommand::Shutdown);
+        // SAFETY: worker 尚未回收，线程消息队列仍然存在。
+        let _ = unsafe {
+            PostThreadMessageW(self.thread_id, HOTKEY_CONTROL_MESSAGE, WPARAM(0), LPARAM(0))
+        };
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn run_hotkey_loop(receiver: mpsc::Receiver<HotkeyCommand>, handler: ActivationHandler) {
+    let mut registered: Option<RegisteredHotkey> = None;
+    loop {
+        let mut message = MSG::default();
+        // SAFETY: message 指向当前栈上的有效 MSG，空 HWND 读取线程消息队列。
+        let result = unsafe { GetMessageW(&mut message, None, 0, 0) }.0;
+        if result <= 0 {
+            break;
+        }
+        if message.message == HOTKEY_CONTROL_MESSAGE {
+            while let Ok(command) = receiver.try_recv() {
+                match command {
+                    HotkeyCommand::Replace {
+                        shortcut,
+                        respond_to,
+                    } => {
+                        let result = replace_registered_hotkey(&mut registered, shortcut);
+                        let _ = respond_to.send(result);
+                    }
+                    HotkeyCommand::Clear { respond_to } => {
+                        let result = clear_registered_hotkey(&mut registered);
+                        let _ = respond_to.send(result);
+                    }
+                    HotkeyCommand::Shutdown => {
+                        let _ = clear_registered_hotkey(&mut registered);
+                        return;
+                    }
+                }
+            }
+        } else if message.message == WM_HOTKEY
+            && registered.is_some_and(|hotkey| message.wParam.0 == hotkey.id as usize)
+        {
+            handler(ActivationRequest::GlobalShortcutPressed);
+        }
+    }
+    let _ = clear_registered_hotkey(&mut registered);
+}
+
+fn replace_registered_hotkey(
+    registered: &mut Option<RegisteredHotkey>,
+    shortcut: GlobalShortcut,
+) -> Result<(), PlatformError> {
+    if registered.is_some_and(|current| current.shortcut == shortcut) {
+        return Ok(());
+    }
+    let new_id = match registered {
+        Some(current) if current.id == 0x5101 => 0x5102,
+        _ => 0x5101,
+    };
+    // SAFETY: 线程消息队列已经创建；ID 只在该线程内使用。
+    unsafe {
+        RegisterHotKey(
+            None,
+            new_id,
+            hotkey_modifiers(shortcut),
+            shortcut_virtual_key(shortcut.key()),
+        )
+    }
+    .map_err(|error| {
+        PlatformError::new(
+            "register_global_shortcut",
+            format!("{} 注册失败，可能已被其他应用占用：{error}", shortcut),
+        )
+    })?;
+
+    if let Some(old) = registered {
+        // 先注册新组合再移除旧组合，冲突时旧快捷键始终保留。
+        if let Err(error) = unsafe { UnregisterHotKey(None, old.id) } {
+            let _ = unsafe { UnregisterHotKey(None, new_id) };
+            return Err(PlatformError::new(
+                "replace_global_shortcut",
+                format!("旧快捷键未能安全移除：{error}"),
+            ));
+        }
+    }
+    *registered = Some(RegisteredHotkey {
+        id: new_id,
+        shortcut,
+    });
+    Ok(())
+}
+
+fn clear_registered_hotkey(registered: &mut Option<RegisteredHotkey>) -> Result<(), PlatformError> {
+    if let Some(current) = *registered {
+        // SAFETY: current.id 由当前线程成功注册且尚未移除。
+        unsafe { UnregisterHotKey(None, current.id) }
+            .map_err(|error| PlatformError::new("clear_global_shortcut", error.to_string()))?;
+        *registered = None;
+    }
+    Ok(())
+}
+
+fn hotkey_modifiers(shortcut: GlobalShortcut) -> HOT_KEY_MODIFIERS {
+    let modifiers = shortcut.modifiers();
+    let mut bits = MOD_NOREPEAT.0;
+    if modifiers.ctrl() {
+        bits |= MOD_CONTROL.0;
+    }
+    if modifiers.alt() {
+        bits |= MOD_ALT.0;
+    }
+    if modifiers.shift() {
+        bits |= MOD_SHIFT.0;
+    }
+    HOT_KEY_MODIFIERS(bits)
+}
+
+fn shortcut_virtual_key(key: ShortcutKey) -> u32 {
+    match key {
+        ShortcutKey::Letter(value) => value as u32,
+        ShortcutKey::Digit(value) => u32::from(b'0' + value),
+        ShortcutKey::Function(value) => 0x70 + u32::from(value - 1),
+        ShortcutKey::Space => 0x20,
+        ShortcutKey::Tab => 0x09,
+        ShortcutKey::Enter => 0x0D,
+        ShortcutKey::Escape => 0x1B,
+        ShortcutKey::Backspace => 0x08,
+        ShortcutKey::Insert => 0x2D,
+        ShortcutKey::Delete => 0x2E,
+        ShortcutKey::Home => 0x24,
+        ShortcutKey::End => 0x23,
+        ShortcutKey::PageUp => 0x21,
+        ShortcutKey::PageDown => 0x22,
+        ShortcutKey::Left => 0x25,
+        ShortcutKey::Right => 0x27,
+        ShortcutKey::Up => 0x26,
+        ShortcutKey::Down => 0x28,
+        ShortcutKey::Semicolon => 0xBA,
+        ShortcutKey::Equals => 0xBB,
+        ShortcutKey::Comma => 0xBC,
+        ShortcutKey::Minus => 0xBD,
+        ShortcutKey::Period => 0xBE,
+        ShortcutKey::Slash => 0xBF,
+        ShortcutKey::Backtick => 0xC0,
+        ShortcutKey::LeftBracket => 0xDB,
+        ShortcutKey::Backslash => 0xDC,
+        ShortcutKey::RightBracket => 0xDD,
+        ShortcutKey::Quote => 0xDE,
     }
 }
 
@@ -237,4 +541,29 @@ fn send_pipe_message(payload: &[u8]) -> Result<(), PlatformError> {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hotkey_modifiers, shortcut_virtual_key};
+    use quicknote_app::platform::{GlobalShortcut, ShortcutKey};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
+    };
+
+    #[test]
+    fn windows_registration_always_adds_no_repeat_and_maps_keys() {
+        let default = GlobalShortcut::default();
+        let modifiers = hotkey_modifiers(default).0;
+        assert_ne!(modifiers & MOD_NOREPEAT.0, 0);
+        assert_ne!(modifiers & MOD_CONTROL.0, 0);
+        assert_ne!(modifiers & MOD_ALT.0, 0);
+        assert_eq!(modifiers & MOD_SHIFT.0, 0);
+        assert_eq!(shortcut_virtual_key(default.key()), u32::from(b'Q'));
+
+        let function = GlobalShortcut::parse("Shift+F24").expect("解析功能键");
+        assert_eq!(function.key(), ShortcutKey::Function(24));
+        assert_eq!(shortcut_virtual_key(function.key()), 0x87);
+        assert_ne!(hotkey_modifiers(function).0 & MOD_NOREPEAT.0, 0);
+    }
 }
