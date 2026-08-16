@@ -2,37 +2,48 @@
 
 use quicknote_app::platform::{
     ActivationHandler, ActivationRequest, GlobalShortcut, InstanceLease, InstanceRole,
-    PRODUCT_IDENTITY, PlatformCommand, PlatformError, PlatformServices, ShortcutKey,
+    NotificationProjectionKey, PRODUCT_IDENTITY, PlatformCommand, PlatformError, PlatformServices,
+    ShortcutKey, reminder_protocol_uri,
 };
+use quicknote_app::{ReminderActivation, ReminderActivationAction};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
+use windows::Data::Xml::Dom::XmlDocument;
+use windows::Foundation::DateTime;
+use windows::UI::Notifications::{ScheduledToastNotification, ToastNotificationManager};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE, LPARAM, WPARAM,
+    GetLastError, HANDLE, INVALID_HANDLE_VALUE, LPARAM, PROPERTYKEY, WPARAM,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_MODE, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     WaitNamedPipeW,
 };
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
+use windows::Win32::System::WinRT::{RO_INIT_SINGLETHREADED, RoInitialize, RoUninitialize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
     UnregisterHotKey,
 };
-use windows::Win32::UI::Shell::{SetCurrentProcessExplicitAppUserModelID, ShellExecuteW};
+use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+use windows::Win32::UI::Shell::{
+    IShellLinkW, SetCurrentProcessExplicitAppUserModelID, ShellExecuteW, ShellLink,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SW_SHOWNORMAL, WM_APP,
     WM_HOTKEY,
 };
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{GUID, HSTRING, Interface, PCWSTR};
 use winreg::RegKey;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
 
@@ -42,6 +53,36 @@ const SHUTDOWN_MESSAGE: &[u8] = b"__quicknote_shutdown__";
 const MAX_ACTIVATION_BYTES: usize = 64 * 1024;
 const HOTKEY_CONTROL_MESSAGE: u32 = WM_APP + 17;
 const HOTKEY_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const WINDOWS_EPOCH_OFFSET_100NS: i64 = 116_444_736_000_000_000;
+const APP_USER_MODEL_PROPERTY_SET: GUID = GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3);
+const APP_USER_MODEL_ID_KEY: PROPERTYKEY = PROPERTYKEY {
+    fmtid: APP_USER_MODEL_PROPERTY_SET,
+    pid: 5,
+};
+const TOAST_ACTIVATOR_CLSID_KEY: PROPERTYKEY = PROPERTYKEY {
+    fmtid: APP_USER_MODEL_PROPERTY_SET,
+    pid: 26,
+};
+// 快捷方式和当前用户 COM 注册共用稳定 CLSID；通知动作仍统一走 quicknote 协议。
+const TOAST_ACTIVATOR_CLSID: &str = "{7E5ACBFA-9501-4F8A-9C85-60C1AE5D17C4}";
+
+/// UI 线程持有的 WinRT apartment 租约。
+pub struct WinRtApartment;
+
+impl Drop for WinRtApartment {
+    fn drop(&mut self) {
+        // SAFETY: 与同一线程成功的 RoInitialize 成对调用。
+        unsafe { RoUninitialize() };
+    }
+}
+
+/// 在创建 Slint 窗口前初始化通知 API 使用的 STA apartment。
+pub fn initialize_winrt_apartment() -> Result<WinRtApartment, PlatformError> {
+    // SAFETY: 主 UI 线程仅在启动时调用一次，并由返回租约负责反初始化。
+    unsafe { RoInitialize(RO_INIT_SINGLETHREADED) }
+        .map_err(|error| PlatformError::new("initialize_winrt", error.to_string()))?;
+    Ok(WinRtApartment)
+}
 
 /// 使用稳定 AUMID、协议和本地数据目录的生产 Windows adapter。
 #[derive(Clone)]
@@ -68,7 +109,294 @@ impl WindowsPlatformServices {
         let aumid = HSTRING::from(PRODUCT_IDENTITY.aumid);
         // SAFETY: HSTRING 在同步 Shell 调用期间保持有效。
         unsafe { SetCurrentProcessExplicitAppUserModelID(PCWSTR(aumid.as_ptr())) }
-            .map_err(|error| PlatformError::new("set_process_aumid", error.to_string()))
+            .map_err(|error| PlatformError::new("set_process_aumid", error.to_string()))?;
+        self.register_notification_identity()
+    }
+
+    fn register_notification_identity(&self) -> Result<(), PlatformError> {
+        let executable = std::env::current_exe().map_err(|error| {
+            PlatformError::new("resolve_notification_executable", error.to_string())
+        })?;
+        let current_user = RegKey::predef(HKEY_CURRENT_USER);
+        let (identity, _) = current_user
+            .create_subkey(format!(
+                r"Software\Classes\AppUserModelId\{}",
+                PRODUCT_IDENTITY.aumid
+            ))
+            .map_err(|error| {
+                PlatformError::new("register_notification_identity", error.to_string())
+            })?;
+        identity
+            .set_value("DisplayName", &PRODUCT_IDENTITY.product_name)
+            .map_err(|error| {
+                PlatformError::new("register_notification_identity", error.to_string())
+            })?;
+
+        // Compat 桌面通知身份要求 CLSID 指向当前 EXE；协议动作不会调用这个入口。
+        let (activator, _) = current_user
+            .create_subkey(format!(
+                r"Software\Classes\CLSID\{TOAST_ACTIVATOR_CLSID}\LocalServer32"
+            ))
+            .map_err(|error| {
+                PlatformError::new("register_notification_activator", error.to_string())
+            })?;
+        activator
+            .set_value(
+                "",
+                &format!("\"{}\" --toast-activated", executable.display()),
+            )
+            .map_err(|error| {
+                PlatformError::new("register_notification_activator", error.to_string())
+            })?;
+
+        let protocol_path = format!(r"Software\Classes\{}", PRODUCT_IDENTITY.protocol);
+        let (protocol, _) = current_user
+            .create_subkey(&protocol_path)
+            .map_err(|error| {
+                PlatformError::new("register_notification_protocol", error.to_string())
+            })?;
+        protocol
+            .set_value(
+                "",
+                &format!("URL:{} Protocol", PRODUCT_IDENTITY.product_name),
+            )
+            .and_then(|_| protocol.set_value("URL Protocol", &""))
+            .map_err(|error| {
+                PlatformError::new("register_notification_protocol", error.to_string())
+            })?;
+        let (command, _) = current_user
+            .create_subkey(format!(r"{protocol_path}\shell\open\command"))
+            .map_err(|error| {
+                PlatformError::new("register_notification_protocol", error.to_string())
+            })?;
+        command
+            .set_value("", &format!("\"{}\" \"%1\"", executable.display()))
+            .map_err(|error| {
+                PlatformError::new("register_notification_protocol", error.to_string())
+            })?;
+        let executable_text = executable.to_string_lossy().into_owned();
+        let shortcut = Self::notification_shortcut_path()?;
+        let registered_executable = identity.get_value::<String, _>("ExecutablePath").ok();
+        if registered_executable.as_deref() != Some(executable_text.as_str()) || !shortcut.exists()
+        {
+            Self::ensure_notification_shortcut(&executable)?;
+            identity
+                .set_value("ExecutablePath", &executable_text)
+                .map_err(|error| {
+                    PlatformError::new("register_notification_identity", error.to_string())
+                })?;
+        }
+        Ok(())
+    }
+
+    fn notification_shortcut_path() -> Result<PathBuf, PlatformError> {
+        let app_data = std::env::var_os("APPDATA")
+            .ok_or_else(|| PlatformError::new("resolve_notification_shortcut", "APPDATA 未配置"))?;
+        Ok(PathBuf::from(app_data)
+            .join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs")
+            .join(format!("{}.lnk", PRODUCT_IDENTITY.product_name)))
+    }
+
+    fn ensure_notification_shortcut(executable: &Path) -> Result<(), PlatformError> {
+        let shortcut = Self::notification_shortcut_path()?;
+        let parent = shortcut.parent().ok_or_else(|| {
+            PlatformError::new("resolve_notification_shortcut", "开始菜单路径无父目录")
+        })?;
+        fs::create_dir_all(parent).map_err(|error| {
+            PlatformError::new("create_notification_shortcut_directory", error.to_string())
+        })?;
+
+        let executable_wide = wide_path(executable)?;
+        let shortcut_wide = wide_path(&shortcut)?;
+        let description = wide(&format!("{} 桌面便签", PRODUCT_IDENTITY.product_name));
+        let working_directory = executable.parent().map(wide_path).transpose()?;
+
+        // SAFETY: WinRT STA 已在调用前初始化；所有 PCWSTR 缓冲区在同步 COM 调用期间保持有效。
+        unsafe {
+            let shell_link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+                .map_err(|error| {
+                    PlatformError::new("create_notification_shortcut", error.to_string())
+                })?;
+            shell_link
+                .SetPath(PCWSTR(executable_wide.as_ptr()))
+                .and_then(|_| shell_link.SetDescription(PCWSTR(description.as_ptr())))
+                .map_err(|error| {
+                    PlatformError::new("configure_notification_shortcut", error.to_string())
+                })?;
+            if let Some(working_directory) = working_directory.as_ref() {
+                shell_link
+                    .SetWorkingDirectory(PCWSTR(working_directory.as_ptr()))
+                    .map_err(|error| {
+                        PlatformError::new("configure_notification_shortcut", error.to_string())
+                    })?;
+            }
+
+            let property_store: IPropertyStore = shell_link.cast().map_err(|error| {
+                PlatformError::new("open_notification_shortcut_properties", error.to_string())
+            })?;
+            let aumid = PROPVARIANT::from(PRODUCT_IDENTITY.aumid);
+            let activator = PROPVARIANT::from(TOAST_ACTIVATOR_CLSID);
+            property_store
+                .SetValue(&APP_USER_MODEL_ID_KEY, &aumid)
+                .and_then(|_| property_store.SetValue(&TOAST_ACTIVATOR_CLSID_KEY, &activator))
+                .and_then(|_| property_store.Commit())
+                .map_err(|error| {
+                    PlatformError::new("write_notification_shortcut_identity", error.to_string())
+                })?;
+
+            let persist_file: IPersistFile = shell_link.cast().map_err(|error| {
+                PlatformError::new("persist_notification_shortcut", error.to_string())
+            })?;
+            persist_file
+                .Save(PCWSTR(shortcut_wide.as_ptr()), true)
+                .map_err(|error| {
+                    PlatformError::new("persist_notification_shortcut", error.to_string())
+                })?;
+        }
+        Ok(())
+    }
+
+    fn notification_notifier() -> Result<windows::UI::Notifications::ToastNotifier, PlatformError> {
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(PRODUCT_IDENTITY.aumid))
+            .map_err(|error| PlatformError::new("create_notification_notifier", error.to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn upsert_notification(
+        reminder_id: uuid::Uuid,
+        trigger_version: u64,
+        scheduled_at_ms: i64,
+        title: &str,
+        body: &str,
+        snooze_minutes: u16,
+        open_activation_key: &str,
+        snooze_activation_key: &str,
+    ) -> Result<(), PlatformError> {
+        let notifier = Self::notification_notifier()?;
+        let group = notification_group(reminder_id);
+        let tag = encode_trigger_tag(trigger_version);
+        let scheduled = notifier.GetScheduledToastNotifications().map_err(|error| {
+            PlatformError::new("list_scheduled_notifications", error.to_string())
+        })?;
+        let mut already_present = false;
+        let size = scheduled.Size().map_err(|error| {
+            PlatformError::new("list_scheduled_notifications", error.to_string())
+        })?;
+        for index in 0..size {
+            let item = scheduled.GetAt(index).map_err(|error| {
+                PlatformError::new("read_scheduled_notification", error.to_string())
+            })?;
+            if item
+                .Group()
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+                == group
+                && item
+                    .Tag()
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+                    == tag
+            {
+                already_present = true;
+            }
+        }
+        if already_present {
+            return Ok(());
+        }
+
+        let open_activation = ReminderActivation {
+            activation_key: open_activation_key.to_owned(),
+            reminder_id,
+            trigger_version,
+            action: ReminderActivationAction::Open,
+            snooze_minutes: None,
+        };
+        let snooze_activation = ReminderActivation {
+            activation_key: snooze_activation_key.to_owned(),
+            reminder_id,
+            trigger_version,
+            action: ReminderActivationAction::Snooze,
+            snooze_minutes: Some(snooze_minutes),
+        };
+        let open_uri = xml_escape(&reminder_protocol_uri(&open_activation));
+        let snooze_uri = xml_escape(&reminder_protocol_uri(&snooze_activation));
+        let xml = format!(
+            "<toast activationType=\"protocol\" launch=\"{open_uri}\">\
+             <visual><binding template=\"ToastGeneric\">\
+             <text>{}</text><text>{}</text>\
+             </binding></visual><actions>\
+             <action content=\"稍后提醒（{snooze_minutes} 分钟）\" activationType=\"protocol\" arguments=\"{snooze_uri}\"/>\
+             <action content=\"打开\" activationType=\"protocol\" arguments=\"{open_uri}\"/>\
+             </actions></toast>",
+            xml_escape(title),
+            xml_escape(body)
+        );
+        let document = XmlDocument::new()
+            .map_err(|error| PlatformError::new("create_notification_xml", error.to_string()))?;
+        document
+            .LoadXml(&HSTRING::from(xml))
+            .map_err(|error| PlatformError::new("load_notification_xml", error.to_string()))?;
+        let delivery_time = unix_ms_to_windows_datetime(scheduled_at_ms)?;
+        let notification =
+            ScheduledToastNotification::CreateScheduledToastNotification(&document, delivery_time)
+                .map_err(|error| {
+                    PlatformError::new("create_scheduled_notification", error.to_string())
+                })?;
+        // 官方取消示例只依赖 Tag + Group；不设置额外的 16 字符 Id 可避免旧通知平台限制。
+        notification
+            .SetGroup(&HSTRING::from(group))
+            .map_err(|error| {
+                PlatformError::new("group_scheduled_notification", error.to_string())
+            })?;
+        notification
+            .SetTag(&HSTRING::from(tag))
+            .map_err(|error| PlatformError::new("tag_scheduled_notification", error.to_string()))?;
+        notifier
+            .AddToSchedule(&notification)
+            .map_err(|error| PlatformError::new("schedule_notification", error.to_string()))
+    }
+
+    fn cancel_notification(
+        reminder_id: uuid::Uuid,
+        trigger_version: u64,
+    ) -> Result<(), PlatformError> {
+        let notifier = Self::notification_notifier()?;
+        let group = notification_group(reminder_id);
+        let tag = encode_trigger_tag(trigger_version);
+        let scheduled = notifier.GetScheduledToastNotifications().map_err(|error| {
+            PlatformError::new("list_scheduled_notifications", error.to_string())
+        })?;
+        let size = scheduled.Size().map_err(|error| {
+            PlatformError::new("list_scheduled_notifications", error.to_string())
+        })?;
+        let mut matches = Vec::new();
+        for index in 0..size {
+            let item = scheduled.GetAt(index).map_err(|error| {
+                PlatformError::new("read_scheduled_notification", error.to_string())
+            })?;
+            if item
+                .Group()
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+                == group
+                && item
+                    .Tag()
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+                    == tag
+            {
+                matches.push(item);
+            }
+        }
+        for item in matches {
+            notifier
+                .RemoveFromSchedule(&item)
+                .map_err(|error| PlatformError::new("cancel_notification", error.to_string()))?;
+        }
+        Ok(())
     }
 
     fn replace_global_shortcut(&self, shortcut: GlobalShortcut) -> Result<(), PlatformError> {
@@ -223,7 +551,31 @@ impl PlatformServices for WindowsPlatformServices {
             PlatformCommand::ClearGlobalShortcut => self.clear_global_shortcut(),
             PlatformCommand::SetStartupEnabled { enabled } => self.set_startup_enabled(enabled),
             PlatformCommand::OpenExternalLink { url } => Self::open_external_link(&url),
-            // 提醒与托盘由后续纵向切片实现。
+            PlatformCommand::UpsertNotification {
+                reminder_id,
+                trigger_version,
+                note_id: _,
+                scheduled_at_ms,
+                title,
+                body,
+                snooze_minutes,
+                open_activation_key,
+                snooze_activation_key,
+            } => Self::upsert_notification(
+                reminder_id,
+                trigger_version,
+                scheduled_at_ms,
+                &title,
+                &body,
+                snooze_minutes,
+                &open_activation_key,
+                &snooze_activation_key,
+            ),
+            PlatformCommand::CancelNotification {
+                reminder_id,
+                trigger_version,
+            } => Self::cancel_notification(reminder_id, trigger_version),
+            // 托盘由后续纵向切片实现。
             other => Err(PlatformError::new(
                 "apply_platform_command",
                 format!("平台命令尚未接入生产实现：{other:?}"),
@@ -231,11 +583,39 @@ impl PlatformServices for WindowsPlatformServices {
         }
     }
 
-    fn scheduled_notifications(
-        &self,
-    ) -> Result<Vec<quicknote_app::platform::NotificationProjectionKey>, PlatformError> {
-        // #19 只保留提醒领域数据；Windows 计划投影由后续提醒切片接入。
-        Ok(Vec::new())
+    fn scheduled_notifications(&self) -> Result<Vec<NotificationProjectionKey>, PlatformError> {
+        let notifier = Self::notification_notifier()?;
+        let scheduled = notifier.GetScheduledToastNotifications().map_err(|error| {
+            PlatformError::new("list_scheduled_notifications", error.to_string())
+        })?;
+        let size = scheduled.Size().map_err(|error| {
+            PlatformError::new("list_scheduled_notifications", error.to_string())
+        })?;
+        let mut result = Vec::new();
+        for index in 0..size {
+            let item = scheduled.GetAt(index).map_err(|error| {
+                PlatformError::new("read_scheduled_notification", error.to_string())
+            })?;
+            let group = item
+                .Group()
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            let Some(reminder_id) = uuid::Uuid::parse_str(&group).ok() else {
+                continue;
+            };
+            let Some(trigger_version) = item
+                .Tag()
+                .ok()
+                .and_then(|value| decode_trigger_tag(&value.to_string()))
+            else {
+                continue;
+            };
+            result.push(NotificationProjectionKey {
+                reminder_id,
+                trigger_version,
+            });
+        }
+        Ok(result)
     }
 
     fn write_file_atomically(&self, target: &Path, contents: &[u8]) -> Result<(), PlatformError> {
@@ -649,6 +1029,52 @@ fn send_pipe_message(payload: &[u8]) -> Result<(), PlatformError> {
     Ok(())
 }
 
+fn notification_group(reminder_id: uuid::Uuid) -> String {
+    reminder_id.simple().to_string()
+}
+
+fn encode_trigger_tag(mut trigger_version: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if trigger_version == 0 {
+        return "0".to_owned();
+    }
+    let mut encoded = Vec::new();
+    while trigger_version > 0 {
+        encoded.push(char::from(DIGITS[(trigger_version % 36) as usize]));
+        trigger_version /= 36;
+    }
+    encoded.into_iter().rev().collect()
+}
+
+fn decode_trigger_tag(value: &str) -> Option<u64> {
+    value.chars().try_fold(0_u64, |result, character| {
+        character
+            .to_digit(36)
+            .and_then(|digit| result.checked_mul(36)?.checked_add(u64::from(digit)))
+    })
+}
+
+fn unix_ms_to_windows_datetime(timestamp_ms: i64) -> Result<DateTime, PlatformError> {
+    let ticks = timestamp_ms
+        .checked_mul(10_000)
+        .and_then(|value| value.checked_add(WINDOWS_EPOCH_OFFSET_100NS))
+        .ok_or_else(|| {
+            PlatformError::new("encode_notification_time", "提醒时间超出 Windows 范围")
+        })?;
+    Ok(DateTime {
+        UniversalTime: ticks,
+    })
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -662,8 +1088,14 @@ fn wide_path(path: &Path) -> Result<Vec<u16>, PlatformError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hotkey_modifiers, shortcut_virtual_key};
-    use quicknote_app::platform::{GlobalShortcut, ShortcutKey};
+    use super::{
+        WINDOWS_EPOCH_OFFSET_100NS, WindowsPlatformServices, decode_trigger_tag,
+        encode_trigger_tag, hotkey_modifiers, initialize_winrt_apartment, notification_group,
+        shortcut_virtual_key, unix_ms_to_windows_datetime, xml_escape,
+    };
+    use quicknote_app::platform::{GlobalShortcut, PRODUCT_IDENTITY, ShortcutKey};
+    use std::time::Duration;
+    use windows::UI::Notifications::ToastNotificationManager;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
     };
@@ -682,5 +1114,83 @@ mod tests {
         assert_eq!(function.key(), ShortcutKey::Function(24));
         assert_eq!(shortcut_virtual_key(function.key()), 0x87);
         assert_ne!(hotkey_modifiers(function).0 & MOD_NOREPEAT.0, 0);
+    }
+
+    #[test]
+    fn notification_payload_uses_windows_time_and_safe_xml() {
+        assert_eq!(
+            unix_ms_to_windows_datetime(0)
+                .expect("编码 Unix epoch")
+                .UniversalTime,
+            WINDOWS_EPOCH_OFFSET_100NS
+        );
+        assert_eq!(xml_escape("<&\"'>"), "&lt;&amp;&quot;&apos;&gt;");
+        let reminder_id =
+            uuid::Uuid::parse_str("019c1234-5678-7abc-8def-0123456789ab").expect("解析提醒 UUID");
+        assert_eq!(
+            notification_group(reminder_id),
+            "019c123456787abc8def0123456789ab"
+        );
+        assert_eq!(
+            decode_trigger_tag(&encode_trigger_tag(u64::MAX)),
+            Some(u64::MAX)
+        );
+        assert!(encode_trigger_tag(u64::MAX).len() <= 16);
+    }
+
+    #[test]
+    #[ignore = "会向当前 Windows 用户发送一条真实系统通知"]
+    fn scheduled_notification_reaches_windows_history() {
+        let _apartment = initialize_winrt_apartment().expect("初始化 WinRT apartment");
+        let platform = WindowsPlatformServices::new();
+        platform
+            .configure_process_identity()
+            .expect("注册桌面通知身份");
+        let reminder_id =
+            uuid::Uuid::parse_str("019c20aa-bbcc-7def-8123-456789abcdef").expect("解析验收 UUID");
+        let trigger_version = 20_026_u64;
+        let group = notification_group(reminder_id);
+        let tag = encode_trigger_tag(trigger_version);
+
+        // 按 Windows 官方示例至少提前十秒安排，并留出五秒完成历史持久化。
+        WindowsPlatformServices::upsert_notification(
+            reminder_id,
+            trigger_version,
+            chrono::Utc::now().timestamp_millis() + 10_000,
+            "QuickNote notification acceptance",
+            "Windows history must retain this reminder",
+            10,
+            "acceptance-open",
+            "acceptance-snooze",
+        )
+        .expect("安排真实通知");
+        std::thread::sleep(Duration::from_secs(15));
+
+        let history = ToastNotificationManager::History().expect("读取通知历史服务");
+        let items = history
+            .GetHistoryWithId(&windows::core::HSTRING::from(PRODUCT_IDENTITY.aumid))
+            .expect("读取 QuickNote 通知历史");
+        let found = (0..items.Size().expect("读取通知历史数量")).any(|index| {
+            let Ok(item) = items.GetAt(index) else {
+                return false;
+            };
+            item.Group()
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+                == group
+                && item
+                    .Tag()
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+                    == tag
+        });
+
+        // 无论断言结果如何，均尽力移除验收产生的通知或残留计划。
+        let _ = history.RemoveGroupWithId(
+            &windows::core::HSTRING::from(&group),
+            &windows::core::HSTRING::from(PRODUCT_IDENTITY.aumid),
+        );
+        let _ = WindowsPlatformServices::cancel_notification(reminder_id, trigger_version);
+        assert!(found, "到点通知没有进入 QuickNote 的 Windows 通知历史");
     }
 }

@@ -6,13 +6,17 @@
 mod windows_platform;
 
 #[cfg(windows)]
+use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
+#[cfg(windows)]
 use quicknote_app::platform::{
     ActivationRequest, InstanceRole, PRODUCT_IDENTITY, PlatformServices,
+    activation_from_protocol_uri,
 };
 #[cfg(windows)]
 use quicknote_app::{
     Application, ApplicationConfig, Command, EditingSnapshot, EditorIntent, NoteAction,
-    NoteDocument, NoteLifecycle, SaveState,
+    NoteDocument, NoteLifecycle, NoteTiming, ReminderActivationOutcome, ReminderCoordinationReason,
+    ReminderStatus, SaveState,
 };
 #[cfg(windows)]
 use quicknote_ui::{MainWindow, NoteListItem, PreviewLinkItem, QuickCaptureWindow, SearchListItem};
@@ -39,6 +43,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Duration;
     use windows_platform::WindowsPlatformServices;
 
+    // WinRT 计划通知与 Slint 共享 UI 线程的 STA apartment。
+    let _apartment = windows_platform::initialize_winrt_apartment()?;
     let platform = WindowsPlatformServices::new();
     platform.configure_process_identity()?;
     let initial_activation = activation_from_arguments();
@@ -62,7 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let quick_capture = QuickCaptureWindow::new()?;
     let initial_editor = application.editing_snapshot()?;
     set_editor_document(&main_window, &quick_capture, &initial_editor);
+    application.coordinate_reminders(&platform, None, ReminderCoordinationReason::Startup)?;
     sync_library(&main_window, &application)?;
+    sync_current_timing(&main_window, &quick_capture, &application)?;
 
     let initial_snapshot = application.snapshot()?;
     let shortcut = initial_snapshot.global_shortcut;
@@ -83,11 +91,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Rc::clone(&application),
         platform.clone(),
     );
-    wire_window_lifecycle(&main_window, &quick_capture, Rc::clone(&application));
+    wire_window_lifecycle(
+        &main_window,
+        &quick_capture,
+        Rc::clone(&application),
+        platform.clone(),
+    );
     route_activation(
         &main_window,
         &quick_capture,
         &application,
+        &platform,
         initial_activation,
     );
 
@@ -97,12 +111,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let timer_application = Rc::clone(&application);
     let last_timer_snapshot = Rc::new(RefCell::new(None::<EditingSnapshot>));
     let timer_snapshot_cache = Rc::clone(&last_timer_snapshot);
+    let last_reminder_tick = Rc::new(RefCell::new(std::time::SystemTime::now()));
+    let reminder_tick = Rc::clone(&last_reminder_tick);
+    let timer_platform = platform.clone();
+    let last_timing = Rc::new(RefCell::new(None::<NoteTiming>));
+    let timing_cache = Rc::clone(&last_timing);
     activation_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
         let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) else {
             return;
         };
         while let Ok(activation) = activation_receiver.try_recv() {
-            route_activation(&main, &capture, &timer_application, activation);
+            route_activation(
+                &main,
+                &capture,
+                &timer_application,
+                &timer_platform,
+                activation,
+            );
         }
         // 只同步保存反馈和摘要，不重设可见 TextEdit 的正文或选择范围。
         if let Ok(snapshot) = timer_application.editing_snapshot() {
@@ -110,6 +135,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if cached.as_ref() != Some(&snapshot) {
                 sync_editor_status(&main, &capture, &snapshot);
                 *cached = Some(snapshot);
+            }
+        }
+        let now = std::time::SystemTime::now();
+        let elapsed = now
+            .duration_since(*reminder_tick.borrow())
+            .unwrap_or_default();
+        if elapsed >= Duration::from_millis(250) {
+            let reason = if elapsed >= Duration::from_secs(5) {
+                ReminderCoordinationReason::Resume
+            } else {
+                ReminderCoordinationReason::Continuous
+            };
+            *reminder_tick.borrow_mut() = now;
+            let focused_note = focused_reminder_note(&main, &capture);
+            match timer_application.coordinate_reminders(&timer_platform, focused_note, reason) {
+                Ok(coordination) => {
+                    if coordination.pending_projection_count > 0 {
+                        main.set_action_status(SharedString::from("提醒等待系统同步"));
+                    }
+                }
+                Err(error) => {
+                    main.set_action_status(SharedString::from(format!("提醒协调失败：{error}")))
+                }
+            }
+            if let Some(note_id) = current_editor_note_id(&main) {
+                if let Ok(timing) = timer_application.note_timing(note_id) {
+                    let changed = timing_cache.borrow().as_ref() != Some(&timing);
+                    if changed {
+                        sync_timing_view(&main, &capture, &timing);
+                        let _ = sync_library(&main, &timer_application);
+                        *timing_cache.borrow_mut() = Some(timing);
+                    }
+                }
+            } else {
+                clear_timing_view(&main, &capture);
+                *timing_cache.borrow_mut() = None;
             }
         }
     });
@@ -130,7 +191,7 @@ fn activation_from_arguments() -> ActivationRequest {
         if argument == "--quick-capture" {
             return ActivationRequest::ShowQuickCapture;
         }
-        return ActivationRequest::ProtocolUri(argument);
+        return activation_from_protocol_uri(&argument);
     }
     ActivationRequest::ShowMain
 }
@@ -177,6 +238,7 @@ fn wire_editor_callbacks(
     });
 
     let application_for_switch = Rc::clone(&application);
+    let platform_for_switch = platform.clone();
     let main_weak = main.as_weak();
     let capture_weak = capture.as_weak();
     main.on_note_selected(move |id| {
@@ -188,7 +250,12 @@ fn wire_editor_callbacks(
                 .and_then(|id| application_for_switch.edit(EditorIntent::SwitchCurrent(id)));
             match result {
                 Ok(snapshot) => {
+                    if let Some(note_id) = snapshot.note_id {
+                        let _ = application_for_switch
+                            .respond_to_due_reminder(&platform_for_switch, note_id);
+                    }
                     set_editor_document(&main, &capture, &snapshot);
+                    let _ = sync_current_timing(&main, &capture, &application_for_switch);
                     let _ = sync_library(&main, &application_for_switch);
                     if main.get_compact_mode() {
                         show_quick_capture_snapshot(&main, &capture, &snapshot);
@@ -209,6 +276,7 @@ fn wire_editor_callbacks(
             match application_for_new.edit(EditorIntent::NewBlankDraft) {
                 Ok(snapshot) => {
                     set_editor_document(&main, &capture, &snapshot);
+                    clear_timing_view(&main, &capture);
                     if main.get_compact_mode() {
                         show_quick_capture_snapshot(&main, &capture, &snapshot);
                     } else {
@@ -264,6 +332,7 @@ fn wire_product_callbacks(
     platform: windows_platform::WindowsPlatformServices,
 ) {
     let app = Rc::clone(&application);
+    let platform_for_search_open = platform.clone();
     let main_weak = main.as_weak();
     let capture_weak = capture.as_weak();
     main.on_archive_note(move |id| {
@@ -397,8 +466,10 @@ fn wire_product_callbacks(
             Ok(note) if note.lifecycle == NoteLifecycle::Active => {
                 match app.edit(EditorIntent::SwitchCurrent(note.id)) {
                     Ok(snapshot) => {
+                        let _ = app.respond_to_due_reminder(&platform_for_search_open, note.id);
                         main.set_section(0);
                         set_editor_document(&main, &capture, &snapshot);
+                        let _ = sync_current_timing(&main, &capture, &app);
                         let _ = sync_library(&main, &app);
                         if main.get_compact_mode() {
                             show_quick_capture_snapshot(&main, &capture, &snapshot);
@@ -430,6 +501,78 @@ fn wire_product_callbacks(
                 main.set_action_status(SharedString::from(format!("链接未打开：{error}")))
             }
         }
+    });
+
+    let app = Rc::clone(&application);
+    let timing_platform = platform.clone();
+    let main_weak = main.as_weak();
+    let capture_weak = capture.as_weak();
+    main.on_due_time_changed(move |value| {
+        let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) else {
+            return;
+        };
+        let result = current_editor_note_id(&main)
+            .ok_or_else(|| quicknote_app::ApplicationError::InvalidCommand {
+                message: "请先保存一张活跃便签".to_owned(),
+            })
+            .and_then(|note_id| parse_local_time(value.as_str()).map(|time| (note_id, time)))
+            .and_then(|(note_id, time)| app.set_due_at(&timing_platform, note_id, Some(time)));
+        show_timing_result(&main, &capture, &app, result, "截止时间已保存");
+    });
+
+    let app = Rc::clone(&application);
+    let timing_platform = platform.clone();
+    let main_weak = main.as_weak();
+    let capture_weak = capture.as_weak();
+    main.on_clear_due_time(move || {
+        let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) else {
+            return;
+        };
+        let result = current_editor_note_id(&main)
+            .ok_or_else(|| quicknote_app::ApplicationError::InvalidCommand {
+                message: "请先保存一张活跃便签".to_owned(),
+            })
+            .and_then(|note_id| app.set_due_at(&timing_platform, note_id, None));
+        show_timing_result(
+            &main,
+            &capture,
+            &app,
+            result,
+            "截止时间已清除；提醒保持不变",
+        );
+    });
+
+    let app = Rc::clone(&application);
+    let timing_platform = platform.clone();
+    let main_weak = main.as_weak();
+    let capture_weak = capture.as_weak();
+    main.on_reminder_time_changed(move |value| {
+        let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) else {
+            return;
+        };
+        let result = current_editor_note_id(&main)
+            .ok_or_else(|| quicknote_app::ApplicationError::InvalidCommand {
+                message: "请先保存一张活跃便签".to_owned(),
+            })
+            .and_then(|note_id| parse_local_time(value.as_str()).map(|time| (note_id, time)))
+            .and_then(|(note_id, time)| app.set_reminder(&timing_platform, note_id, Some(time)));
+        show_timing_result(&main, &capture, &app, result, "提醒已安排");
+    });
+
+    let app = Rc::clone(&application);
+    let timing_platform = platform.clone();
+    let main_weak = main.as_weak();
+    let capture_weak = capture.as_weak();
+    main.on_clear_reminder(move || {
+        let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) else {
+            return;
+        };
+        let result = current_editor_note_id(&main)
+            .ok_or_else(|| quicknote_app::ApplicationError::InvalidCommand {
+                message: "请先保存一张活跃便签".to_owned(),
+            })
+            .and_then(|note_id| app.set_reminder(&timing_platform, note_id, None));
+        show_timing_result(&main, &capture, &app, result, "提醒已清除");
     });
 
     wire_settings_callbacks(main, application, platform);
@@ -564,6 +707,7 @@ fn run_note_action(
     match result {
         Ok(snapshot) => {
             set_editor_document(&main, &capture, &snapshot);
+            let _ = sync_current_timing(&main, &capture, application);
             match sync_library(&main, application) {
                 Ok(()) => main.set_action_status(SharedString::from(success_message)),
                 Err(error) => {
@@ -625,13 +769,20 @@ fn wire_window_lifecycle(
     main: &MainWindow,
     capture: &QuickCaptureWindow,
     application: Rc<Application>,
+    platform: windows_platform::WindowsPlatformServices,
 ) {
     let application_for_capture = Rc::clone(&application);
+    let platform_for_capture = platform.clone();
     let main_weak = main.as_weak();
     let capture_weak = capture.as_weak();
     main.on_open_quick_capture(move || {
         if let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) {
-            open_quick_capture(&main, &capture, &application_for_capture);
+            open_quick_capture(
+                &main,
+                &capture,
+                &application_for_capture,
+                &platform_for_capture,
+            );
         }
     });
 
@@ -715,22 +866,55 @@ fn route_activation(
     main: &MainWindow,
     capture: &QuickCaptureWindow,
     application: &Application,
+    platform: &dyn PlatformServices,
     activation: ActivationRequest,
 ) {
     match activation {
         ActivationRequest::GlobalShortcutPressed => {
-            route_global_shortcut(main, capture, application);
+            route_global_shortcut(main, capture, application, platform);
         }
-        ActivationRequest::ShowQuickCapture => open_quick_capture(main, capture, application),
+        ActivationRequest::ShowQuickCapture => {
+            open_quick_capture(main, capture, application, platform)
+        }
         ActivationRequest::ShowMain | ActivationRequest::ProtocolUri(_) => {
             match application.edit(EditorIntent::Flush) {
                 Ok(snapshot) => show_main_window(main, capture, &snapshot),
                 Err(error) => show_editor_error(main, capture, &error),
             }
         }
-        ActivationRequest::Resumed | ActivationRequest::Reminder(_) => {
+        ActivationRequest::Resumed => {
+            let focused_note = focused_reminder_note(main, capture);
+            let _ = application.coordinate_reminders(
+                platform,
+                focused_note,
+                ReminderCoordinationReason::Resume,
+            );
             if let Ok(snapshot) = application.editing_snapshot() {
                 sync_editor_status(main, capture, &snapshot);
+            }
+        }
+        ActivationRequest::Reminder(activation) => {
+            match application.handle_reminder_activation(platform, activation) {
+                Ok(ReminderActivationOutcome::Opened { .. }) => {
+                    if let Ok(snapshot) = application.editing_snapshot() {
+                        show_main_window(main, capture, &snapshot);
+                        let _ = sync_library(main, application);
+                        let _ = sync_current_timing(main, capture, application);
+                        main.set_action_status(SharedString::from("提醒已响应"));
+                    }
+                }
+                Ok(ReminderActivationOutcome::Snoozed {
+                    scheduled_at_ms, ..
+                }) => {
+                    let _ = sync_library(main, application);
+                    let _ = sync_current_timing(main, capture, application);
+                    main.set_action_status(SharedString::from(format!(
+                        "已稍后提醒至 {}",
+                        format_local_time(scheduled_at_ms)
+                    )));
+                }
+                Ok(ReminderActivationOutcome::Ignored) => {}
+                Err(error) => show_editor_error(main, capture, &error),
             }
         }
     }
@@ -741,6 +925,7 @@ fn route_global_shortcut(
     main: &MainWindow,
     capture: &QuickCaptureWindow,
     application: &Application,
+    platform: &dyn PlatformServices,
 ) {
     let main_hwnd = window_hwnd(main.window());
     let capture_hwnd = window_hwnd(capture.window());
@@ -767,14 +952,23 @@ fn route_global_shortcut(
     }
 
     // 没有可见窗口或主页最小化时，才真正打开快速记录。
-    open_quick_capture(main, capture, application);
+    open_quick_capture(main, capture, application, platform);
 }
 
 #[cfg(windows)]
-fn open_quick_capture(main: &MainWindow, capture: &QuickCaptureWindow, application: &Application) {
+fn open_quick_capture(
+    main: &MainWindow,
+    capture: &QuickCaptureWindow,
+    application: &Application,
+    platform: &dyn PlatformServices,
+) {
     match application.edit(EditorIntent::OpenCurrent) {
         Ok(snapshot) => {
+            if let Some(note_id) = snapshot.note_id {
+                let _ = application.respond_to_due_reminder(platform, note_id);
+            }
             show_quick_capture_snapshot(main, capture, &snapshot);
+            let _ = sync_current_timing(main, capture, application);
             let _ = sync_library(main, application);
         }
         Err(error) => show_editor_error(main, capture, &error),
@@ -909,11 +1103,26 @@ fn note_item_model(notes: &[quicknote_app::NoteSummary], fallback: &str) -> Mode
 
 #[cfg(windows)]
 fn note_metadata(note: &quicknote_app::NoteSummary, fallback: &str) -> String {
-    if note.is_current {
+    let mut parts = vec![if note.is_current {
         "当前便签".to_owned()
     } else {
         fallback.to_owned()
+    }];
+    if let Some(due_at_ms) = note.due_at_ms {
+        parts.push(format!("截止 {}", format_local_time(due_at_ms)));
     }
+    if let Some(reminder) = note.reminder.as_ref() {
+        parts.push(match reminder.status {
+            ReminderStatus::Scheduled => {
+                format!("提醒 {}", format_local_time(reminder.scheduled_at_ms))
+            }
+            ReminderStatus::Missed => "错过提醒".to_owned(),
+        });
+        if reminder.platform_sync_pending {
+            parts.push("等待系统同步".to_owned());
+        }
+    }
+    parts.join(" · ")
 }
 
 #[cfg(windows)]
@@ -950,7 +1159,152 @@ fn show_readonly_note(main: &MainWindow, note: &NoteDocument) {
         NoteLifecycle::Archived => "归档",
         NoteLifecycle::Trashed => "回收站",
     }));
+    main.set_readonly_timing(SharedString::from(
+        note.due_at_ms
+            .map(|due| format!("截止时间：{}（提醒已永久清除）", format_local_time(due)))
+            .unwrap_or_default(),
+    ));
     main.set_section(4);
+}
+
+#[cfg(windows)]
+fn current_editor_note_id(main: &MainWindow) -> Option<uuid::Uuid> {
+    uuid::Uuid::parse_str(main.get_editor_note_id().as_str()).ok()
+}
+
+#[cfg(windows)]
+fn focused_reminder_note(main: &MainWindow, capture: &QuickCaptureWindow) -> Option<uuid::Uuid> {
+    // 只有提醒到点前后一直聚焦对应编辑视图才算响应；仅把窗口置前不会走此路径。
+    let foreground = unsafe { GetForegroundWindow() };
+    let main_focused = main.get_section() == 0
+        && window_hwnd(main.window()).is_some_and(|hwnd| hwnd == foreground);
+    let capture_focused = window_hwnd(capture.window()).is_some_and(|hwnd| hwnd == foreground);
+    if main_focused || capture_focused {
+        current_editor_note_id(main)
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn parse_local_time(value: &str) -> Result<i64, quicknote_app::ApplicationError> {
+    let local = NaiveDateTime::parse_from_str(value.trim(), "%Y-%m-%d %H:%M").map_err(|_| {
+        quicknote_app::ApplicationError::InvalidCommand {
+            message: "时间格式应为 YYYY-MM-DD HH:MM".to_owned(),
+        }
+    })?;
+    match Local.from_local_datetime(&local) {
+        LocalResult::Single(value) => Ok(value.timestamp_millis()),
+        LocalResult::Ambiguous(_, _) => Err(quicknote_app::ApplicationError::InvalidCommand {
+            message: "该本地时间因夏令时而重复，请选择其他分钟".to_owned(),
+        }),
+        LocalResult::None => Err(quicknote_app::ApplicationError::InvalidCommand {
+            message: "该本地时间不存在，请选择其他分钟".to_owned(),
+        }),
+    }
+}
+
+#[cfg(windows)]
+fn format_local_time(timestamp_ms: i64) -> String {
+    Local
+        .timestamp_millis_opt(timestamp_ms)
+        .single()
+        .map(|value| value.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "时间超出范围".to_owned())
+}
+
+#[cfg(windows)]
+fn sync_current_timing(
+    main: &MainWindow,
+    capture: &QuickCaptureWindow,
+    application: &Application,
+) -> Result<(), quicknote_app::ApplicationError> {
+    let Some(note_id) = current_editor_note_id(main) else {
+        clear_timing_view(main, capture);
+        return Ok(());
+    };
+    let timing = application.note_timing(note_id)?;
+    sync_timing_view(main, capture, &timing);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn sync_timing_view(main: &MainWindow, capture: &QuickCaptureWindow, timing: &NoteTiming) {
+    main.set_due_time_text(SharedString::from(
+        timing.due_at_ms.map(format_local_time).unwrap_or_default(),
+    ));
+    main.set_reminder_time_text(SharedString::from(
+        timing
+            .reminder
+            .as_ref()
+            .map(|reminder| format_local_time(reminder.scheduled_at_ms))
+            .unwrap_or_default(),
+    ));
+    let missed = timing
+        .reminder
+        .as_ref()
+        .is_some_and(|reminder| reminder.status == ReminderStatus::Missed);
+    let mut status = match timing.reminder.as_ref() {
+        Some(reminder) if reminder.status == ReminderStatus::Missed => format!(
+            "错过提醒：{}；主动打开便签后响应",
+            format_local_time(reminder.scheduled_at_ms)
+        ),
+        Some(reminder) => format!("提醒：{}", format_local_time(reminder.scheduled_at_ms)),
+        None => timing
+            .due_at_ms
+            .map(|due| format!("截止：{}；未设置提醒", format_local_time(due)))
+            .unwrap_or_default(),
+    };
+    if timing.platform_sync_pending {
+        if !status.is_empty() {
+            status.push_str(" · ");
+        }
+        status.push_str("提醒等待系统同步");
+        if let Some(error) = timing.platform_sync_error.as_deref() {
+            status.push('：');
+            status.push_str(error);
+        }
+    }
+    main.set_timing_status(SharedString::from(status.clone()));
+    main.set_reminder_missed(missed);
+    main.set_reminder_sync_pending(timing.platform_sync_pending);
+    capture.set_reminder_status(SharedString::from(status));
+    capture.set_reminder_missed(missed);
+}
+
+#[cfg(windows)]
+fn clear_timing_view(main: &MainWindow, capture: &QuickCaptureWindow) {
+    main.set_due_time_text(SharedString::new());
+    main.set_reminder_time_text(SharedString::new());
+    main.set_timing_status(SharedString::new());
+    main.set_reminder_missed(false);
+    main.set_reminder_sync_pending(false);
+    capture.set_reminder_status(SharedString::new());
+    capture.set_reminder_missed(false);
+}
+
+#[cfg(windows)]
+fn show_timing_result(
+    main: &MainWindow,
+    capture: &QuickCaptureWindow,
+    application: &Application,
+    result: Result<NoteTiming, quicknote_app::ApplicationError>,
+    success_message: &str,
+) {
+    match result {
+        Ok(timing) => {
+            sync_timing_view(main, capture, &timing);
+            let _ = sync_library(main, application);
+            main.set_action_status(SharedString::from(if timing.platform_sync_pending {
+                format!("{success_message}；提醒等待系统同步")
+            } else {
+                success_message.to_owned()
+            }));
+        }
+        Err(error) => {
+            main.set_action_status(SharedString::from(format!("时间设置未保存：{error}")))
+        }
+    }
 }
 
 #[cfg(windows)]
