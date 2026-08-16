@@ -49,6 +49,11 @@ function Wait-ForEditableControl {
         [int]$TimeoutMilliseconds = 5000
     )
 
+    # 计时仍从进程启动前开始；先等消息循环就绪，避免首次 UIA 全树查询自身阻塞约一秒。
+    if (-not $Process.WaitForInputIdle($TimeoutMilliseconds)) {
+        throw 'QuickNote did not reach an input-idle GUI state before the timeout.'
+    }
+
     # UIA 中出现可编辑控件才算快速记录真正可输入。
     $processCondition = [System.Windows.Automation.PropertyCondition]::new(
         [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
@@ -177,3 +182,19 @@ $outputPath = Join-Path $OutputDirectory "$timestamp.json"
 $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $outputPath -Encoding utf8
 $result | ConvertTo-Json -Depth 8
 Write-Output "Result: $outputPath"
+
+# 始终保留测量证据，再让任一硬预算超限产生非零退出。
+$gateFailures = @()
+if ($result.summary.cold_start_p95_ms -gt $result.summary.cold_start_gate_ms) {
+    $gateFailures += "cold start P95 $($result.summary.cold_start_p95_ms) ms > $($result.summary.cold_start_gate_ms) ms"
+}
+if ($result.summary.idle_private_working_set_p95_bytes -gt $result.summary.idle_private_working_set_gate_bytes) {
+    $gateFailures += "idle private working set P95 $($result.summary.idle_private_working_set_p95_bytes) bytes > $($result.summary.idle_private_working_set_gate_bytes) bytes"
+}
+# MVP 尚无安装器，因此 Release 可执行文件就是可验证的应用本体。
+if ($result.executable_bytes -gt $result.summary.installed_app_gate_bytes) {
+    $gateFailures += "application body $($result.executable_bytes) bytes > $($result.summary.installed_app_gate_bytes) bytes"
+}
+if ($gateFailures.Count -gt 0) {
+    throw "Windows shell hard budget failed: $($gateFailures -join '; ')"
+}
