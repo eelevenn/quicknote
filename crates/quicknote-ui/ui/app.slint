@@ -50,11 +50,17 @@ export component MainWindow inherits Window {
     in property <string> readonly-title;
     in property <string> readonly-body;
     in property <string> readonly-lifecycle;
+    in property <string> readonly-timing;
     in-out property <string> shortcut-text: "Ctrl+Alt+Q";
     in property <string> shortcut-status: "全局快捷键已启用";
     in-out property <bool> startup-enabled: false;
     in property <int> snooze-minutes: 10;
     in property <string> action-status;
+    in-out property <string> due-time-text;
+    in-out property <string> reminder-time-text;
+    in property <string> timing-status;
+    in property <bool> reminder-missed: false;
+    in property <bool> reminder-sync-pending: false;
     in-out property <int> confirm-action: 0;
     in-out property <string> confirm-note-id;
     in-out property <string> confirm-note-title;
@@ -78,6 +84,10 @@ export component MainWindow inherits Window {
     callback apply-shortcut(string);
     callback startup-changed(bool);
     callback snooze-changed(int);
+    callback due-time-changed(string);
+    callback clear-due-time();
+    callback reminder-time-changed(string);
+    callback clear-reminder();
     callback export-json();
     callback export-markdown(string);
     callback open-transcription-packages();
@@ -206,6 +216,38 @@ export component MainWindow inherits Window {
                             enabled: root.editor-note-id != "";
                             text: "归档";
                             clicked => { root.archive-note(root.editor-note-id); }
+                        }
+                    }
+                    if root.editor-note-id != "" : VerticalBox {
+                        spacing: 5px;
+                        HorizontalBox {
+                            Text { text: "截止时间"; color: Palette.foreground; vertical-alignment: center; }
+                            LineEdit {
+                                text <=> root.due-time-text;
+                                placeholder-text: "YYYY-MM-DD HH:MM";
+                                accessible-label: "截止时间，本地时区";
+                                accepted => { root.due-time-changed(root.due-time-text); }
+                            }
+                            Button { text: "设置"; clicked => { root.due-time-changed(root.due-time-text); } }
+                            Button { text: "清除"; clicked => { root.clear-due-time(); } }
+                        }
+                        HorizontalBox {
+                            Text { text: "提醒时间"; color: Palette.foreground; vertical-alignment: center; }
+                            LineEdit {
+                                text <=> root.reminder-time-text;
+                                placeholder-text: "YYYY-MM-DD HH:MM";
+                                accessible-label: "提醒时间，必须是未来本地时间";
+                                accepted => { root.reminder-time-changed(root.reminder-time-text); }
+                            }
+                            Button { text: "设置"; clicked => { root.reminder-time-changed(root.reminder-time-text); } }
+                            Button { text: "清除"; clicked => { root.clear-reminder(); } }
+                        }
+                        Text {
+                            text: root.timing-status;
+                            visible: root.timing-status != "";
+                            wrap: word-wrap;
+                            color: root.reminder-missed ? #c42b1c : (root.reminder-sync-pending ? #9a6700 : Palette.alternate-foreground);
+                            accessible-label: root.timing-status;
                         }
                     }
                     main-editor := TextEdit {
@@ -361,6 +403,7 @@ export component MainWindow inherits Window {
                     Text { text: root.readonly-lifecycle; color: Palette.alternate-foreground; vertical-alignment: center; }
                     Button { text: "返回"; clicked => { root.section = root.readonly-lifecycle == "归档" ? 1 : 2; } }
                 }
+                Text { visible: root.readonly-timing != ""; text: root.readonly-timing; color: Palette.alternate-foreground; accessible-label: root.readonly-timing; }
                 ScrollView { Text { text: root.readonly-body; wrap: word-wrap; color: Palette.foreground; accessible-label: "只读便签正文"; } }
             }
         }
@@ -430,6 +473,8 @@ export component QuickCaptureWindow inherits Window {
     in property <string> editor-title: "空白草稿";
     in property <string> save-status: "空白草稿不会创建便签";
     in property <bool> save-failed: false;
+    in property <string> reminder-status;
+    in property <bool> reminder-missed: false;
 
     callback body-edited(string);
     callback retry-save();
@@ -455,6 +500,12 @@ export component QuickCaptureWindow inherits Window {
             accessible-label: "快速记录正文";
             accessible-description: "支持中文输入、粘贴和撤销重做";
             edited(text) => { root.body-edited(text); }
+        }
+        Text {
+            visible: root.reminder-status != "";
+            text: root.reminder-status;
+            color: root.reminder-missed ? #c42b1c : Palette.alternate-foreground;
+            accessible-label: root.reminder-status;
         }
         HorizontalBox {
             Text { text: root.save-status; color: root.save-failed ? #c42b1c : Palette.foreground; accessible-label: root.save-status; }

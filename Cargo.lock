@@ -3711,6 +3711,7 @@ dependencies = [
 name = "quicknote-windows"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "quicknote-app",
  "quicknote-ui",
  "raw-window-handle",
