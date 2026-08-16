@@ -6,6 +6,7 @@ Push-Location -LiteralPath $repositoryRoot
 
 try {
     cargo windows-release
+    & (Join-Path $PSScriptRoot 'Build-TranscriptionSidecar.ps1')
 }
 finally {
     Pop-Location

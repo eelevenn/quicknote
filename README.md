@@ -15,6 +15,8 @@ QuickNote 是面向 Windows 11 的本地优先快速记录应用。生产实现�
 
 截止时间与单一提醒相互独立；未来截止时间在提醒为空时默认安排同刻通知。提醒事实、版本化动作与持久 outbox 在同一 SQLite 事务提交，Windows 计划通知仅在提交后投影。通知提供固化时长的“稍后提醒”和“打开”，支持退出后的通知历史、单实例冷/热激活、错过提醒、休眠恢复收敛、退避重试及 Explorer 计划丢失后的无重复重建。
 
+本地语音输入固定使用 SenseVoice-Small INT8 `2024-07-17` 与 sherpa-onnx `v1.13.5`。约 177 MiB 的模型和运行时只在用户确认后单独下载，经完整校验和自检后原子启用；录音最长 60 秒，结果先进入可编辑预览，并插入录音结束时冻结的便签与光标。音频只存在于当前操作和最多一次瞬态重试，sidecar 完成后退出。已知人工一次可用率理论上限为 79%，所有结果都应在插入前检查；[Issue 21 发布门槛](docs/release-gates/issue-21-local-transcription.md)中的人工项目全部通过前不可发布此能力。
+
 ## 本地验证
 
 ```powershell
@@ -28,6 +30,7 @@ cargo test --workspace
 cargo test -p quicknote-app --test search_scale -- --ignored --nocapture
 
 # 在 Windows x64 上生成生产 Release 构建。
+# 此命令同时构建按需 sidecar，但不会把模型或运行时放进应用本体。
 .\scripts\build-windows.ps1
 ```
 
