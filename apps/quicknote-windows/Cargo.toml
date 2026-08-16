@@ -23,6 +23,7 @@ uuid = "1.18"
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
+winreg = "0.56"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Security",
