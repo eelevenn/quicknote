@@ -13,13 +13,38 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use std::collections::BTreeSet;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const TRASH_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const PERFORMANCE_GUARANTEE_BODY_BYTES: usize = 1024 * 1024;
 const OUTBOX_BATCH_LIMIT: usize = 64;
+
+/// 维护截止时间独立于存储请求流量，避免活跃应用无限推迟清理。
+struct MaintenanceSchedule {
+    next_run: Instant,
+}
+
+impl MaintenanceSchedule {
+    fn new(started_at: Instant) -> Self {
+        Self {
+            next_run: started_at + MAINTENANCE_INTERVAL,
+        }
+    }
+
+    fn wait_from(&self, now: Instant) -> Duration {
+        self.next_run.saturating_duration_since(now)
+    }
+
+    fn is_due(&self, now: Instant) -> bool {
+        now >= self.next_run
+    }
+
+    fn mark_completed(&mut self, completed_at: Instant) {
+        self.next_run = completed_at + MAINTENANCE_INTERVAL;
+    }
+}
 
 /// `schedule` outbox 的完整、不可变通知载荷。
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -626,12 +651,12 @@ fn run_writer(
     faults: StorageFaultPlan,
 ) {
     let mut faults = StorageFaultRuntime::new(faults);
+    let mut maintenance = MaintenanceSchedule::new(Instant::now());
     loop {
-        let request = match receiver.recv_timeout(MAINTENANCE_INTERVAL) {
+        let request = match receiver.recv_timeout(maintenance.wait_from(Instant::now())) {
             Ok(request) => request,
             Err(RecvTimeoutError::Timeout) => {
-                // 后台维护失败不会终止单写者；下一次显式维护仍会返回错误。
-                let _ = purge_expired_trash(&mut connection, now_ms());
+                maintain_trash_if_due(&mut connection, &mut maintenance);
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => break,
@@ -812,9 +837,20 @@ fn run_writer(
             }
             StorageRequest::Shutdown => break,
         }
+        maintain_trash_if_due(&mut connection, &mut maintenance);
     }
     // 正常退出收敛 WAL，失败只影响维护状态，不破坏已提交事务。
     let _ = connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+}
+
+fn maintain_trash_if_due(connection: &mut Connection, maintenance: &mut MaintenanceSchedule) {
+    let now = Instant::now();
+    if !maintenance.is_due(now) {
+        return;
+    }
+    // 后台维护失败不终止单写者；下一次显式维护仍会返回错误。
+    let _ = purge_expired_trash(connection, now_ms());
+    maintenance.mark_completed(now);
 }
 
 fn execute_command(
@@ -2749,7 +2785,8 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::derive_title;
+    use super::{MAINTENANCE_INTERVAL, MaintenanceSchedule, derive_title};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn title_uses_first_non_empty_line_without_splitting_unicode() {
@@ -2757,5 +2794,23 @@ mod tests {
         assert_eq!(derive_title(" \n\t"), "");
         let long = "便".repeat(100);
         assert_eq!(derive_title(&long).chars().count(), 80);
+    }
+
+    #[test]
+    fn storage_activity_does_not_reset_the_maintenance_deadline() {
+        let started_at = Instant::now();
+        let mut maintenance = MaintenanceSchedule::new(started_at);
+        let request_at = started_at + Duration::from_secs(23 * 60 * 60);
+
+        assert_eq!(
+            maintenance.wait_from(request_at),
+            Duration::from_secs(60 * 60)
+        );
+        assert!(!maintenance.is_due(request_at));
+
+        let due_at = started_at + MAINTENANCE_INTERVAL;
+        assert!(maintenance.is_due(due_at));
+        maintenance.mark_completed(due_at);
+        assert_eq!(maintenance.wait_from(due_at), MAINTENANCE_INTERVAL);
     }
 }
