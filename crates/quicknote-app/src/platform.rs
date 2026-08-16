@@ -1,6 +1,7 @@
 //! 仅承载真实平台差异的 `PlatformServices` seam。
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -24,6 +25,319 @@ pub const PRODUCT_IDENTITY: ProductIdentity = ProductIdentity {
     protocol: "quicknote",
 };
 
+/// 全局快捷键使用的平台中立修饰键集合。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ShortcutModifiers {
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+}
+
+impl ShortcutModifiers {
+    /// 返回组合是否包含 Ctrl。
+    pub fn ctrl(self) -> bool {
+        self.ctrl
+    }
+
+    /// 返回组合是否包含 Alt。
+    pub fn alt(self) -> bool {
+        self.alt
+    }
+
+    /// 返回组合是否包含 Shift。
+    pub fn shift(self) -> bool {
+        self.shift
+    }
+
+    fn is_empty(self) -> bool {
+        !self.ctrl && !self.alt && !self.shift
+    }
+}
+
+/// Windows adapter 可映射的普通快捷键。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ShortcutKey {
+    /// A-Z 字母。
+    Letter(char),
+    /// 0-9 数字。
+    Digit(u8),
+    /// F1-F24 功能键。
+    Function(u8),
+    /// 空格键。
+    Space,
+    /// Tab 键。
+    Tab,
+    /// Enter 键。
+    Enter,
+    /// Escape 键。
+    Escape,
+    /// Backspace 键。
+    Backspace,
+    /// Insert 键。
+    Insert,
+    /// Delete 键。
+    Delete,
+    /// Home 键。
+    Home,
+    /// End 键。
+    End,
+    /// PageUp 键。
+    PageUp,
+    /// PageDown 键。
+    PageDown,
+    /// 左方向键。
+    Left,
+    /// 右方向键。
+    Right,
+    /// 上方向键。
+    Up,
+    /// 下方向键。
+    Down,
+    /// 分号键。
+    Semicolon,
+    /// 等号键。
+    Equals,
+    /// 逗号键。
+    Comma,
+    /// 减号键。
+    Minus,
+    /// 句点键。
+    Period,
+    /// 斜杠键。
+    Slash,
+    /// 反引号键。
+    Backtick,
+    /// 左方括号键。
+    LeftBracket,
+    /// 反斜杠键。
+    Backslash,
+    /// 右方括号键。
+    RightBracket,
+    /// 单引号键。
+    Quote,
+}
+
+/// 已验证且可稳定序列化的全局快捷键。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GlobalShortcut {
+    modifiers: ShortcutModifiers,
+    key: ShortcutKey,
+}
+
+impl GlobalShortcut {
+    /// 解析并验证用户输入；不会为无效或冲突组合静默换键。
+    pub fn parse(value: &str) -> Result<Self, ShortcutValidationError> {
+        let mut modifiers = ShortcutModifiers::default();
+        let mut key = None;
+        let mut saw_token = false;
+
+        for raw_token in value.split('+') {
+            let token = raw_token.trim();
+            if token.is_empty() {
+                return Err(ShortcutValidationError::new("快捷键包含空片段"));
+            }
+            saw_token = true;
+            match token.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => set_modifier(&mut modifiers.ctrl, "Ctrl")?,
+                "alt" => set_modifier(&mut modifiers.alt, "Alt")?,
+                "shift" => set_modifier(&mut modifiers.shift, "Shift")?,
+                "win" | "windows" | "meta" | "super" => {
+                    return Err(ShortcutValidationError::new(
+                        "快捷键不得包含 Windows 徽标键",
+                    ));
+                }
+                _ => {
+                    if key.is_some() {
+                        return Err(ShortcutValidationError::new(
+                            "快捷键必须且只能包含一个普通键",
+                        ));
+                    }
+                    key = Some(parse_shortcut_key(token)?);
+                }
+            }
+        }
+
+        if !saw_token {
+            return Err(ShortcutValidationError::new("快捷键不能为空"));
+        }
+        let key = key.ok_or_else(|| {
+            ShortcutValidationError::new("快捷键必须包含一个普通键，不能只有修饰键")
+        })?;
+        if key == ShortcutKey::Function(12) {
+            return Err(ShortcutValidationError::new(
+                "F12 保留给系统调试器，不能注册为全局快捷键",
+            ));
+        }
+        if modifiers.is_empty() && !matches!(key, ShortcutKey::Function(1..=11 | 13..=24)) {
+            return Err(ShortcutValidationError::new(
+                "无修饰快捷键只允许 F1-F11 或 F13-F24",
+            ));
+        }
+
+        Ok(Self { modifiers, key })
+    }
+
+    /// 返回已验证的修饰键集合。
+    pub fn modifiers(self) -> ShortcutModifiers {
+        self.modifiers
+    }
+
+    /// 返回已验证的普通键。
+    pub fn key(self) -> ShortcutKey {
+        self.key
+    }
+}
+
+impl Default for GlobalShortcut {
+    fn default() -> Self {
+        Self {
+            modifiers: ShortcutModifiers {
+                ctrl: true,
+                alt: true,
+                shift: false,
+            },
+            key: ShortcutKey::Letter('Q'),
+        }
+    }
+}
+
+impl fmt::Display for GlobalShortcut {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut parts = Vec::with_capacity(4);
+        if self.modifiers.ctrl {
+            parts.push("Ctrl".to_owned());
+        }
+        if self.modifiers.alt {
+            parts.push("Alt".to_owned());
+        }
+        if self.modifiers.shift {
+            parts.push("Shift".to_owned());
+        }
+        parts.push(shortcut_key_name(self.key));
+        formatter.write_str(&parts.join("+"))
+    }
+}
+
+/// 用户快捷键不满足安全注册规则。
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+#[error("快捷键无效：{message}")]
+pub struct ShortcutValidationError {
+    message: String,
+}
+
+impl ShortcutValidationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+fn set_modifier(slot: &mut bool, name: &str) -> Result<(), ShortcutValidationError> {
+    if *slot {
+        return Err(ShortcutValidationError::new(format!(
+            "修饰键 {name} 不能重复"
+        )));
+    }
+    *slot = true;
+    Ok(())
+}
+
+fn parse_shortcut_key(token: &str) -> Result<ShortcutKey, ShortcutValidationError> {
+    let upper = token.to_ascii_uppercase();
+    if upper.len() == 1 {
+        let value = upper.as_bytes()[0];
+        return match value {
+            b'A'..=b'Z' => Ok(ShortcutKey::Letter(char::from(value))),
+            b'0'..=b'9' => Ok(ShortcutKey::Digit(value - b'0')),
+            b';' => Ok(ShortcutKey::Semicolon),
+            b'=' => Ok(ShortcutKey::Equals),
+            b',' => Ok(ShortcutKey::Comma),
+            b'-' => Ok(ShortcutKey::Minus),
+            b'.' => Ok(ShortcutKey::Period),
+            b'/' => Ok(ShortcutKey::Slash),
+            b'`' => Ok(ShortcutKey::Backtick),
+            b'[' => Ok(ShortcutKey::LeftBracket),
+            b'\\' => Ok(ShortcutKey::Backslash),
+            b']' => Ok(ShortcutKey::RightBracket),
+            b'\'' => Ok(ShortcutKey::Quote),
+            _ => Err(ShortcutValidationError::new("不支持该普通键")),
+        };
+    }
+    if let Some(number) = upper.strip_prefix('F')
+        && let Ok(number) = number.parse::<u8>()
+        && (1..=24).contains(&number)
+    {
+        return Ok(ShortcutKey::Function(number));
+    }
+
+    match upper.as_str() {
+        "SPACE" => Ok(ShortcutKey::Space),
+        "TAB" => Ok(ShortcutKey::Tab),
+        "ENTER" | "RETURN" => Ok(ShortcutKey::Enter),
+        "ESC" | "ESCAPE" => Ok(ShortcutKey::Escape),
+        "BACKSPACE" => Ok(ShortcutKey::Backspace),
+        "INSERT" | "INS" => Ok(ShortcutKey::Insert),
+        "DELETE" | "DEL" => Ok(ShortcutKey::Delete),
+        "HOME" => Ok(ShortcutKey::Home),
+        "END" => Ok(ShortcutKey::End),
+        "PAGEUP" | "PGUP" => Ok(ShortcutKey::PageUp),
+        "PAGEDOWN" | "PGDN" => Ok(ShortcutKey::PageDown),
+        "LEFT" => Ok(ShortcutKey::Left),
+        "RIGHT" => Ok(ShortcutKey::Right),
+        "UP" => Ok(ShortcutKey::Up),
+        "DOWN" => Ok(ShortcutKey::Down),
+        "SEMICOLON" => Ok(ShortcutKey::Semicolon),
+        "EQUALS" => Ok(ShortcutKey::Equals),
+        "COMMA" => Ok(ShortcutKey::Comma),
+        "MINUS" => Ok(ShortcutKey::Minus),
+        "PERIOD" => Ok(ShortcutKey::Period),
+        "SLASH" => Ok(ShortcutKey::Slash),
+        "BACKTICK" => Ok(ShortcutKey::Backtick),
+        "LEFTBRACKET" => Ok(ShortcutKey::LeftBracket),
+        "BACKSLASH" => Ok(ShortcutKey::Backslash),
+        "RIGHTBRACKET" => Ok(ShortcutKey::RightBracket),
+        "QUOTE" => Ok(ShortcutKey::Quote),
+        _ => Err(ShortcutValidationError::new(format!(
+            "无法识别普通键 {token}"
+        ))),
+    }
+}
+
+fn shortcut_key_name(key: ShortcutKey) -> String {
+    match key {
+        ShortcutKey::Letter(value) => value.to_string(),
+        ShortcutKey::Digit(value) => value.to_string(),
+        ShortcutKey::Function(value) => format!("F{value}"),
+        ShortcutKey::Space => "Space".to_owned(),
+        ShortcutKey::Tab => "Tab".to_owned(),
+        ShortcutKey::Enter => "Enter".to_owned(),
+        ShortcutKey::Escape => "Escape".to_owned(),
+        ShortcutKey::Backspace => "Backspace".to_owned(),
+        ShortcutKey::Insert => "Insert".to_owned(),
+        ShortcutKey::Delete => "Delete".to_owned(),
+        ShortcutKey::Home => "Home".to_owned(),
+        ShortcutKey::End => "End".to_owned(),
+        ShortcutKey::PageUp => "PageUp".to_owned(),
+        ShortcutKey::PageDown => "PageDown".to_owned(),
+        ShortcutKey::Left => "Left".to_owned(),
+        ShortcutKey::Right => "Right".to_owned(),
+        ShortcutKey::Up => "Up".to_owned(),
+        ShortcutKey::Down => "Down".to_owned(),
+        ShortcutKey::Semicolon => ";".to_owned(),
+        ShortcutKey::Equals => "=".to_owned(),
+        ShortcutKey::Comma => ",".to_owned(),
+        ShortcutKey::Minus => "-".to_owned(),
+        ShortcutKey::Period => ".".to_owned(),
+        ShortcutKey::Slash => "/".to_owned(),
+        ShortcutKey::Backtick => "`".to_owned(),
+        ShortcutKey::LeftBracket => "[".to_owned(),
+        ShortcutKey::Backslash => "\\".to_owned(),
+        ShortcutKey::RightBracket => "]".to_owned(),
+        ShortcutKey::Quote => "'".to_owned(),
+    }
+}
+
 /// 平台壳送入共享应用的激活事件。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ActivationRequest {
@@ -31,6 +345,8 @@ pub enum ActivationRequest {
     ShowMain,
     /// 显示并聚焦快速记录窗。
     ShowQuickCapture,
+    /// 全局快捷键触发，由 UI 线程按焦点三态决定最终动作。
+    GlobalShortcutPressed,
     /// 保留协议载荷，后续纵向切片再解析领域动作。
     ProtocolUri(String),
     /// 系统从挂起状态恢复，需要应用协调本地事实。
@@ -42,8 +358,8 @@ pub enum ActivationRequest {
 pub enum PlatformCommand {
     /// 注册或替换全局快捷键。
     SetGlobalShortcut {
-        /// 已通过应用规则验证的快捷键表示。
-        accelerator: String,
+        /// 已通过应用规则验证的快捷键。
+        shortcut: GlobalShortcut,
     },
     /// 移除当前全局快捷键。
     ClearGlobalShortcut,
@@ -150,6 +466,7 @@ pub mod test_support {
         primary: bool,
         handler: Option<ActivationHandler>,
         commands: Vec<PlatformCommand>,
+        next_apply_error: Option<PlatformError>,
     }
 
     /// 可控制数据目录、激活和平台投影的测试 adapter。
@@ -174,6 +491,15 @@ pub mod test_support {
                 .lock()
                 .map(|state| state.commands.clone())
                 .map_err(|error| PlatformError::new("read_test_commands", error.to_string()))
+        }
+
+        /// 让下一条平台投影失败，用于验证调用方的恢复语义。
+        pub fn fail_next_apply(&self, message: impl Into<String>) -> Result<(), PlatformError> {
+            self.state
+                .lock()
+                .map_err(|error| PlatformError::new("configure_test_failure", error.to_string()))?
+                .next_apply_error = Some(PlatformError::new("test_platform_apply", message));
+            Ok(())
         }
     }
 
@@ -207,11 +533,14 @@ pub mod test_support {
         }
 
         fn apply(&self, command: PlatformCommand) -> Result<(), PlatformError> {
-            self.state
+            let mut state = self
+                .state
                 .lock()
-                .map_err(|error| PlatformError::new("apply_test_command", error.to_string()))?
-                .commands
-                .push(command);
+                .map_err(|error| PlatformError::new("apply_test_command", error.to_string()))?;
+            if let Some(error) = state.next_apply_error.take() {
+                return Err(error);
+            }
+            state.commands.push(command);
             Ok(())
         }
     }
@@ -235,7 +564,10 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::TestPlatformServices;
-    use super::{ActivationRequest, PRODUCT_IDENTITY, PlatformCommand, PlatformServices};
+    use super::{
+        ActivationRequest, GlobalShortcut, PRODUCT_IDENTITY, PlatformCommand, PlatformServices,
+        ShortcutKey,
+    };
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -270,5 +602,35 @@ mod tests {
             vec![PlatformCommand::SetTrayVisible { visible: true }]
         );
         assert_eq!(PRODUCT_IDENTITY.protocol, "quicknote");
+    }
+
+    #[test]
+    fn shortcut_policy_accepts_only_explicit_safe_combinations() {
+        let default = GlobalShortcut::parse("ctrl + Alt + q").expect("解析默认快捷键");
+        assert_eq!(default, GlobalShortcut::default());
+        assert_eq!(default.to_string(), "Ctrl+Alt+Q");
+
+        let bare_function = GlobalShortcut::parse("F13").expect("允许无修饰 F13");
+        assert_eq!(bare_function.key(), ShortcutKey::Function(13));
+        assert!(bare_function.modifiers().is_empty());
+
+        for rejected in [
+            "Q",
+            "7",
+            "Space",
+            "Left",
+            "F12",
+            "Ctrl+Win+Q",
+            "Ctrl+Alt",
+            "Ctrl+Q+W",
+        ] {
+            assert!(
+                GlobalShortcut::parse(rejected).is_err(),
+                "{rejected} 必须被拒绝"
+            );
+        }
+        assert!(GlobalShortcut::parse("Shift+Space").is_ok());
+        assert!(GlobalShortcut::parse("Ctrl+PageDown").is_ok());
+        assert!(GlobalShortcut::parse("Alt+F24").is_ok());
     }
 }

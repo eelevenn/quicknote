@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// ASCII `QN01`，作为所有生产数据库的固定 SQLite 身份。
 pub(crate) const APPLICATION_ID: i32 = 0x514E_3031;
 /// 当前客户端能够完整读写的最高 schema 版本。
-pub(crate) const SUPPORTED_SCHEMA_VERSION: i32 = 1;
+pub(crate) const SUPPORTED_SCHEMA_VERSION: i32 = 2;
 
 /// 仅由模块内测试使用的确定性迁移故障点。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,6 +157,11 @@ fn migrate(
         if fault == MigrationFault::AfterSchema {
             return Err("已注入 schema 创建后的迁移失败".to_owned());
         }
+    }
+    if from_version < 2 {
+        transaction
+            .execute_batch(SCHEMA_V2)
+            .map_err(|error| error.to_string())?;
     }
 
     transaction
@@ -313,4 +318,10 @@ END;
 
 INSERT INTO settings(key, value_json, updated_at_ms)
 VALUES ('default_snooze_minutes', '10', unixepoch('subsec') * 1000);
+"#;
+
+const SCHEMA_V2: &str = r#"
+-- 快捷键保存平台中立规范串；Windows 注册是否成功仍由 adapter 决定。
+INSERT OR IGNORE INTO settings(key, value_json, updated_at_ms)
+VALUES ('global_shortcut', '"Ctrl+Alt+Q"', unixepoch('subsec') * 1000);
 "#;

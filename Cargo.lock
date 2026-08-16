@@ -3712,8 +3712,10 @@ version = "0.1.0"
 dependencies = [
  "quicknote-app",
  "quicknote-ui",
+ "raw-window-handle",
  "serde_json",
  "slint",
+ "uuid",
  "windows",
 ]
 
@@ -4349,6 +4351,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",
