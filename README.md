@@ -9,7 +9,9 @@ QuickNote 是面向 Windows 11 的本地优先快速记录应用。生产实现�
 - `apps/quicknote-windows`：Windows adapter、全局快捷键、单实例激活路由与生产入口。
 - `benchmarks/windows-stack`：技术栈与 Windows 集成 spike 证据，不属于生产实现。
 
-当前纵向切片支持默认 `Ctrl+Alt+Q` 快捷呼出、当前便签与空白草稿、250 ms 尾随且最长 1 秒等待的真实自动保存，以及主页切换当前便签。首次非空保存会在一个事务中创建便签、正文和当前指针；关闭、切换和退出前刷新失败时，操作会被中止且正文保留在内存中。
+当前纵向切片支持默认 `Ctrl+Alt+Q` 快捷呼出、当前便签与空白草稿、250 ms 尾随且最长 1 秒等待的真实自动保存，以及宽窗口双栏/窄窗口单栏主页。首次非空保存会在一个事务中创建便签、正文和当前指针；关闭、切换、归档、导出和退出前刷新失败时，操作会被中止且正文保留在内存中。
+
+主页实现严格的 `活跃 ⇄ 归档 → 回收站 → 永久清除` 生命周期、30 天回收站维护、活跃/归档完整正文子串搜索、安全轻量 Markdown 预览、版本化 JSON 与单张 Markdown 原子导出。设置包含全局快捷键、登录后启动、默认稍后提醒时长、本地转写包管理入口及 About/第三方许可证，并通过 Slint 系统调色板跟随 Windows 主题。
 
 ## 本地验证
 
@@ -19,6 +21,9 @@ cargo check -p quicknote-app
 
 # 运行应用模块、共享 UI 与 Windows 壳测试。
 cargo test --workspace
+
+# 显式运行 10,000 张 / 100 MiB 搜索规模验收。
+cargo test -p quicknote-app --test search_scale -- --ignored --nocapture
 
 # 在 Windows x64 上生成生产 Release 构建。
 .\scripts\build-windows.ps1

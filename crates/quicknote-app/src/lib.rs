@@ -7,24 +7,41 @@
 mod editing;
 mod error;
 mod interface;
+mod markdown;
 pub mod platform;
 mod storage;
 
 pub use error::ApplicationError;
 pub use interface::{
     ApplicationConfig, ApplicationSnapshot, Command, CommandResult, EditingSnapshot, EditorIntent,
-    NoteSummary, SaveState, SchemaIdentity,
+    ExportBundle, ExportReminder, ExportSettings, LibrarySnapshot, MarkdownLink, MarkdownPreview,
+    NoteAction, NoteDocument, NoteLifecycle, NoteSummary, NoteTiming, ReminderActivation,
+    ReminderActivationAction, ReminderActivationOutcome, ReminderCoordination,
+    ReminderCoordinationReason, ReminderSnapshot, ReminderStatus, SaveState, SchemaIdentity,
+    SearchResult,
 };
 
 use platform::{GlobalShortcut, PlatformCommand, PlatformServices};
+use std::path::Path;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use storage::{StorageClient, StorageFaultPlan, StorageWriter};
+use uuid::Uuid;
 
 /// 供 Slint UI、平台壳和自动化共同使用的应用模块接口。
 pub struct Application {
     // 字段顺序确保编辑协调器先停止，再关闭 SQLite 单写者。
     editor: editing::Editor,
     storage: StorageClient,
+    reminder_focus: Mutex<ReminderFocusState>,
     _writer: StorageWriter,
+}
+
+#[derive(Default)]
+struct ReminderFocusState {
+    focused_note_id: Option<Uuid>,
+    observed_at_ms: Option<i64>,
+    last_platform_reconcile_ms: Option<i64>,
 }
 
 impl Application {
@@ -43,6 +60,126 @@ impl Application {
         self.storage.snapshot()
     }
 
+    /// 读取活跃、归档和回收站的完整导航摘要。
+    pub fn library_snapshot(&self) -> Result<LibrarySnapshot, ApplicationError> {
+        self.storage.library_snapshot()
+    }
+
+    /// 读取一张未永久清除便签；归档与回收站正文始终只读。
+    pub fn note(&self, note_id: Uuid) -> Result<NoteDocument, ApplicationError> {
+        self.storage.read_note(note_id)
+    }
+
+    /// 读取一张活跃便签相互独立的截止时间与单一提醒。
+    pub fn note_timing(&self, note_id: Uuid) -> Result<NoteTiming, ApplicationError> {
+        self.storage.read_note_timing(note_id)
+    }
+
+    /// 更新截止时间；首次设置未来截止且提醒为空时自动创建同一时刻提醒。
+    pub fn set_due_at(
+        &self,
+        platform: &dyn PlatformServices,
+        note_id: Uuid,
+        due_at_ms: Option<i64>,
+    ) -> Result<NoteTiming, ApplicationError> {
+        self.editor.apply(EditorIntent::Flush)?;
+        self.storage.set_due_at(note_id, due_at_ms, now_ms())?;
+        let coordination = self.project_reminder_outbox(platform, true)?;
+        self.timing_with_coordination(note_id, coordination)
+    }
+
+    /// 创建、替换或清除一张活跃便签的单一未来提醒。
+    pub fn set_reminder(
+        &self,
+        platform: &dyn PlatformServices,
+        note_id: Uuid,
+        scheduled_at_ms: Option<i64>,
+    ) -> Result<NoteTiming, ApplicationError> {
+        self.editor.apply(EditorIntent::Flush)?;
+        self.storage
+            .set_reminder(note_id, scheduled_at_ms, now_ms())?;
+        let coordination = self.project_reminder_outbox(platform, true)?;
+        self.timing_with_coordination(note_id, coordination)
+    }
+
+    /// 用户主动打开活跃便签时，仅响应已经到点的提醒。
+    pub fn respond_to_due_reminder(
+        &self,
+        platform: &dyn PlatformServices,
+        note_id: Uuid,
+    ) -> Result<bool, ApplicationError> {
+        let responded = self.storage.respond_to_due_reminder(note_id, now_ms())?;
+        if responded {
+            let _ = self.project_reminder_outbox(platform, true)?;
+        }
+        Ok(responded)
+    }
+
+    /// 幂等处理通知打开或稍后提醒动作；平台失败不会回滚领域事实。
+    pub fn handle_reminder_activation(
+        &self,
+        platform: &dyn PlatformServices,
+        activation: ReminderActivation,
+    ) -> Result<ReminderActivationOutcome, ApplicationError> {
+        if activation.action == ReminderActivationAction::Open {
+            self.editor.apply(EditorIntent::Flush)?;
+        }
+        let outcome = self
+            .storage
+            .handle_reminder_activation(activation, now_ms())?;
+        let _ = self.project_reminder_outbox(platform, true)?;
+        if matches!(outcome, ReminderActivationOutcome::Opened { .. }) {
+            self.editor.apply(EditorIntent::OpenCurrent)?;
+        }
+        Ok(outcome)
+    }
+
+    /// 在启动、持续运行和恢复阶段收敛到期状态、outbox 与 Windows 计划。
+    pub fn coordinate_reminders(
+        &self,
+        platform: &dyn PlatformServices,
+        focused_note_id: Option<Uuid>,
+        reason: ReminderCoordinationReason,
+    ) -> Result<ReminderCoordination, ApplicationError> {
+        let timestamp = now_ms();
+        let (focused_since_ms, should_reconcile) = {
+            let mut state = self.reminder_focus.lock().map_err(|error| {
+                ApplicationError::WriterUnavailable {
+                    message: format!("提醒焦点状态不可用：{error}"),
+                }
+            })?;
+            let focused_since_ms = if reason == ReminderCoordinationReason::Continuous
+                && state.focused_note_id == focused_note_id
+            {
+                state.observed_at_ms
+            } else {
+                None
+            };
+            let should_reconcile = reason != ReminderCoordinationReason::Continuous
+                || state
+                    .last_platform_reconcile_ms
+                    .is_none_or(|last| timestamp.saturating_sub(last) >= 60_000);
+            state.focused_note_id = focused_note_id;
+            state.observed_at_ms = Some(timestamp);
+            if should_reconcile {
+                state.last_platform_reconcile_ms = Some(timestamp);
+            }
+            (focused_since_ms, should_reconcile)
+        };
+        self.storage.advance_due_reminders(
+            timestamp,
+            focused_note_id,
+            focused_since_ms,
+            reason != ReminderCoordinationReason::Continuous,
+        )?;
+        self.project_reminder_outbox(platform, should_reconcile)
+    }
+
+    /// 搜索活跃和归档正文，使用大小写不敏感的文字子串合同。
+    pub fn search(&self, query: &str) -> Result<Vec<SearchResult>, ApplicationError> {
+        self.storage.search(query)
+    }
+
     /// 读取主页与快速记录共同拥有的编辑状态。
     pub fn editing_snapshot(&self) -> Result<EditingSnapshot, ApplicationError> {
         self.editor.snapshot()
@@ -51,6 +188,77 @@ impl Application {
     /// 提交编辑意图；自动保存计时、合并和刷新顺序由模块内部保证。
     pub fn edit(&self, intent: EditorIntent) -> Result<EditingSnapshot, ApplicationError> {
         self.editor.apply(intent)
+    }
+
+    /// 刷新全部编辑后执行严格的便签生命周期转换。
+    pub fn apply_note_action(
+        &self,
+        action: NoteAction,
+    ) -> Result<EditingSnapshot, ApplicationError> {
+        self.editor.apply(EditorIntent::Flush)?;
+        self.storage.apply_note_action(action)?;
+        self.editor.apply(EditorIntent::OpenCurrent)
+    }
+
+    /// 立即执行一次 30 天回收站维护；后台单写者也会每 24 小时执行。
+    pub fn maintain_trash(&self) -> Result<u64, ApplicationError> {
+        let deleted = self.storage.maintain_trash()?;
+        self.editor.apply(EditorIntent::OpenCurrent)?;
+        Ok(deleted)
+    }
+
+    /// 把 Markdown 原文解析为安全的纯文本预览和显式链接列表。
+    pub fn preview_markdown(source: &str) -> MarkdownPreview {
+        markdown::render_preview(source)
+    }
+
+    /// 刷新编辑后导出版本化、无损且不含内部投影状态的 JSON。
+    pub fn export_json(
+        &self,
+        platform: &dyn PlatformServices,
+        target: &Path,
+    ) -> Result<(), ApplicationError> {
+        self.editor.apply(EditorIntent::Flush)?;
+        let bundle = self.storage.export_bundle()?;
+        let mut bytes = serde_json::to_vec_pretty(&bundle)
+            .map_err(|error| ApplicationError::storage("encode_json_export", error))?;
+        bytes.push(b'\n');
+        platform
+            .write_file_atomically(target, &bytes)
+            .map_err(ApplicationError::platform)
+    }
+
+    /// 刷新编辑后把一张便签以 YAML front matter 加原始正文导出。
+    pub fn export_markdown(
+        &self,
+        platform: &dyn PlatformServices,
+        note_id: Uuid,
+        target: &Path,
+    ) -> Result<(), ApplicationError> {
+        self.editor.apply(EditorIntent::Flush)?;
+        let note = self.storage.read_note(note_id)?;
+        let bytes = markdown::markdown_export(&note);
+        platform
+            .write_file_atomically(target, bytes.as_bytes())
+            .map_err(ApplicationError::platform)
+    }
+
+    /// 只有用户明确点击预览链接时才请求平台打开 http(s) 地址。
+    pub fn open_external_link(
+        &self,
+        platform: &dyn PlatformServices,
+        url: &str,
+    ) -> Result<(), ApplicationError> {
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err(ApplicationError::InvalidCommand {
+                message: "只允许明确打开 http 或 https 外部链接".to_owned(),
+            });
+        }
+        platform
+            .apply(PlatformCommand::OpenExternalLink {
+                url: url.to_owned(),
+            })
+            .map_err(ApplicationError::platform)
     }
 
     /// 启动时注册已经持久化的快捷键；冲突不会改写设置。
@@ -96,6 +304,32 @@ impl Application {
         Ok(shortcut)
     }
 
+    /// 先更新系统自启动，再持久化设置；失败时恢复旧平台状态。
+    pub fn configure_startup(
+        &self,
+        platform: &dyn PlatformServices,
+        enabled: bool,
+    ) -> Result<(), ApplicationError> {
+        let old_enabled = self.snapshot()?.startup_enabled;
+        platform
+            .apply(PlatformCommand::SetStartupEnabled { enabled })
+            .map_err(ApplicationError::platform)?;
+        if let Err(storage_error) = self.storage.persist_startup_enabled(enabled) {
+            if let Err(rollback_error) = platform.apply(PlatformCommand::SetStartupEnabled {
+                enabled: old_enabled,
+            }) {
+                return Err(ApplicationError::Platform {
+                    operation: "rollback_startup_setting",
+                    message: format!(
+                        "设置持久化失败：{storage_error}；旧自启动状态恢复失败：{rollback_error}"
+                    ),
+                });
+            }
+            return Err(storage_error);
+        }
+        Ok(())
+    }
+
     fn open_with_fault(
         config: ApplicationConfig,
         fault: storage::MigrationFault,
@@ -111,18 +345,87 @@ impl Application {
         let connection = storage::open_database(&config, migration_fault)?;
         let writer = StorageWriter::start(connection, storage_faults)?;
         let storage = writer.client();
+        // 启动时先清理绝对保留期已满的回收站便签，再建立编辑视图。
+        storage.maintain_trash()?;
         let editor = editing::Editor::start(storage.clone())?;
         Ok(Self {
             editor,
             storage,
+            reminder_focus: Mutex::new(ReminderFocusState::default()),
             _writer: writer,
         })
     }
+
+    fn project_reminder_outbox(
+        &self,
+        platform: &dyn PlatformServices,
+        reconcile: bool,
+    ) -> Result<ReminderCoordination, ApplicationError> {
+        let timestamp = now_ms();
+        let mut platform_error = None;
+        if reconcile {
+            match platform.scheduled_notifications() {
+                Ok(scheduled) => self
+                    .storage
+                    .reconcile_reminder_projections(scheduled, timestamp)?,
+                Err(error) => platform_error = Some(error.to_string()),
+            }
+        }
+        for projection in self.storage.ready_reminder_projections(timestamp)? {
+            match platform.apply(projection.command) {
+                Ok(()) => self
+                    .storage
+                    .complete_reminder_projection(projection.outbox_id)?,
+                Err(error) => {
+                    let message = error.to_string();
+                    self.storage.fail_reminder_projection(
+                        projection.outbox_id,
+                        timestamp,
+                        message.clone(),
+                    )?;
+                    platform_error = Some(message);
+                    break;
+                }
+            }
+        }
+        Ok(ReminderCoordination {
+            pending_projection_count: self.storage.pending_reminder_projection_count()?,
+            platform_error,
+        })
+    }
+
+    fn timing_with_coordination(
+        &self,
+        note_id: Uuid,
+        coordination: ReminderCoordination,
+    ) -> Result<NoteTiming, ApplicationError> {
+        let mut timing = self.storage.read_note_timing(note_id)?;
+        if coordination.pending_projection_count > 0 {
+            timing.platform_sync_pending = true;
+            timing.platform_sync_error = coordination.platform_error.clone();
+            if let Some(reminder) = timing.reminder.as_mut() {
+                reminder.platform_sync_pending = true;
+                reminder.platform_sync_error = coordination.platform_error;
+            }
+        }
+        Ok(timing)
+    }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Application, ApplicationConfig, ApplicationError, EditorIntent, SaveState};
+    use super::{
+        Application, ApplicationConfig, ApplicationError, EditorIntent, NoteAction, SaveState,
+    };
     use crate::platform::test_support::TestPlatformServices;
     use crate::platform::{GlobalShortcut, PlatformCommand};
     use crate::storage::{
@@ -130,7 +433,7 @@ mod tests {
     };
     use rusqlite::Connection;
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
 
     #[test]
@@ -398,5 +701,70 @@ mod tests {
         assert_eq!(final_state.body, "版本 B");
         assert_eq!(final_state.revision, final_state.saved_revision);
         assert!(matches!(final_state.save_state, SaveState::Saved));
+    }
+
+    #[test]
+    fn startup_maintenance_purges_only_notes_at_the_absolute_thirty_day_boundary() {
+        let directory = TempDir::new().expect("创建临时目录");
+        let app = Application::open(ApplicationConfig::new(directory.path())).expect("打开应用");
+        app.edit(EditorIntent::ReplaceBody("到期便签".to_owned()))
+            .expect("编辑到期便签");
+        let expired = app
+            .edit(EditorIntent::Flush)
+            .expect("保存到期便签")
+            .note_id
+            .expect("到期便签身份");
+        app.apply_note_action(NoteAction::Archive(expired))
+            .expect("归档到期便签");
+        app.apply_note_action(NoteAction::MoveToTrash(expired))
+            .expect("移入回收站");
+        app.edit(EditorIntent::NewBlankDraft).expect("新建保留便签");
+        app.edit(EditorIntent::ReplaceBody("尚未到期".to_owned()))
+            .expect("编辑保留便签");
+        let retained = app
+            .edit(EditorIntent::Flush)
+            .expect("保存保留便签")
+            .note_id
+            .expect("保留便签身份");
+        app.apply_note_action(NoteAction::Archive(retained))
+            .expect("归档保留便签");
+        app.apply_note_action(NoteAction::MoveToTrash(retained))
+            .expect("保留便签进入回收站");
+        drop(app);
+
+        let now_ms: i64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("系统时间有效")
+            .as_millis()
+            .try_into()
+            .expect("时间在 i64 范围");
+        let exact_boundary = now_ms - 30 * 24 * 60 * 60 * 1_000;
+        let connection =
+            Connection::open(directory.path().join("quicknote.db")).expect("打开维护测试数据库");
+        connection
+            .execute(
+                "UPDATE notes SET trashed_at_ms = ?1 WHERE id = ?2",
+                rusqlite::params![exact_boundary - 1_000, expired.as_bytes().as_slice()],
+            )
+            .expect("设置到期时间");
+        connection
+            .execute(
+                "UPDATE notes SET trashed_at_ms = ?1 WHERE id = ?2",
+                rusqlite::params![exact_boundary + 60_000, retained.as_bytes().as_slice()],
+            )
+            .expect("设置未到期时间");
+        drop(connection);
+
+        let reopened =
+            Application::open(ApplicationConfig::new(directory.path())).expect("启动并维护");
+        assert!(reopened.note(expired).is_err());
+        assert_eq!(
+            reopened
+                .snapshot()
+                .expect("读取维护结果")
+                .trashed_note_count,
+            1
+        );
+        assert!(reopened.note(retained).is_ok());
     }
 }

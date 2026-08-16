@@ -2,10 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::ReminderActivation;
 
 /// Windows 注册、通知和激活统一使用的稳定产品身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,6 +28,75 @@ pub const PRODUCT_IDENTITY: ProductIdentity = ProductIdentity {
     aumid: "eelevenn.QuickNote",
     protocol: "quicknote",
 };
+
+/// 为通知正文或按钮生成只包含稳定 ASCII 字段的协议 URI。
+pub fn reminder_protocol_uri(activation: &ReminderActivation) -> String {
+    let action = match activation.action {
+        crate::ReminderActivationAction::Open => "open",
+        crate::ReminderActivationAction::Snooze => "snooze",
+    };
+    let mut uri = format!(
+        "{}://reminder/{action}?activation_key={}&reminder_id={}&trigger_version={}",
+        PRODUCT_IDENTITY.protocol,
+        activation.activation_key,
+        activation.reminder_id,
+        activation.trigger_version
+    );
+    if let Some(minutes) = activation.snooze_minutes {
+        uri.push_str(&format!("&snooze_minutes={minutes}"));
+    }
+    uri
+}
+
+/// 解析 QuickNote 通知协议；未知或被篡改的载荷只退化为普通协议激活。
+pub fn activation_from_protocol_uri(value: &str) -> ActivationRequest {
+    let prefix = format!("{}://reminder/", PRODUCT_IDENTITY.protocol);
+    let Some(rest) = value.strip_prefix(&prefix) else {
+        return ActivationRequest::ProtocolUri(value.to_owned());
+    };
+    let Some((action, query)) = rest.split_once('?') else {
+        return ActivationRequest::ProtocolUri(value.to_owned());
+    };
+    let action = match action {
+        "open" => crate::ReminderActivationAction::Open,
+        "snooze" => crate::ReminderActivationAction::Snooze,
+        _ => return ActivationRequest::ProtocolUri(value.to_owned()),
+    };
+    let mut activation_key = None;
+    let mut reminder_id = None;
+    let mut trigger_version = None;
+    let mut snooze_minutes = None;
+    for pair in query.split('&') {
+        let Some((key, pair_value)) = pair.split_once('=') else {
+            return ActivationRequest::ProtocolUri(value.to_owned());
+        };
+        match key {
+            "activation_key" => activation_key = Some(pair_value.to_owned()),
+            "reminder_id" => reminder_id = Uuid::parse_str(pair_value).ok(),
+            "trigger_version" => trigger_version = pair_value.parse().ok(),
+            "snooze_minutes" => snooze_minutes = pair_value.parse().ok(),
+            _ => return ActivationRequest::ProtocolUri(value.to_owned()),
+        }
+    }
+    let (Some(activation_key), Some(reminder_id), Some(trigger_version)) =
+        (activation_key, reminder_id, trigger_version)
+    else {
+        return ActivationRequest::ProtocolUri(value.to_owned());
+    };
+    if Uuid::parse_str(&activation_key).is_err()
+        || (action == crate::ReminderActivationAction::Open && snooze_minutes.is_some())
+        || (action == crate::ReminderActivationAction::Snooze && snooze_minutes.is_none())
+    {
+        return ActivationRequest::ProtocolUri(value.to_owned());
+    }
+    ActivationRequest::Reminder(ReminderActivation {
+        activation_key,
+        reminder_id,
+        trigger_version,
+        action,
+        snooze_minutes,
+    })
+}
 
 /// 全局快捷键使用的平台中立修饰键集合。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -347,10 +420,21 @@ pub enum ActivationRequest {
     ShowQuickCapture,
     /// 全局快捷键触发，由 UI 线程按焦点三态决定最终动作。
     GlobalShortcutPressed,
-    /// 保留协议载荷，后续纵向切片再解析领域动作。
+    /// 无法识别的协议载荷只打开主页，不执行领域动作。
     ProtocolUri(String),
+    /// 已验证结构的通知打开或稍后提醒动作。
+    Reminder(ReminderActivation),
     /// 系统从挂起状态恢复，需要应用协调本地事实。
     Resumed,
+}
+
+/// Windows 通知计划中可与领域提醒对账的稳定键。
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct NotificationProjectionKey {
+    /// 稳定提醒身份。
+    pub reminder_id: Uuid,
+    /// 生成通知时的触发版本。
+    pub trigger_version: u64,
 }
 
 /// 由应用提交、在事务完成后执行的平台投影。
@@ -369,12 +453,20 @@ pub enum PlatformCommand {
         reminder_id: Uuid,
         /// 防止旧投影覆盖新提醒的单调版本。
         trigger_version: u64,
+        /// 对应活跃便签身份，用于协议激活路由。
+        note_id: Uuid,
         /// UTC Unix 毫秒触发时刻。
         scheduled_at_ms: i64,
         /// 用户可见标题。
         title: String,
         /// 用户可见正文。
         body: String,
+        /// 当前通知固化的稍后提醒分钟数。
+        snooze_minutes: u16,
+        /// 正文点击和“打开”按钮共享的幂等键。
+        open_activation_key: String,
+        /// “稍后提醒”按钮使用的幂等键。
+        snooze_activation_key: String,
     },
     /// 删除不再对应领域事实的系统通知。
     CancelNotification {
@@ -392,6 +484,11 @@ pub enum PlatformCommand {
     SetStartupEnabled {
         /// 用户是否请求登录后启动。
         enabled: bool,
+    },
+    /// 在用户明确点击后交给系统打开外部网页。
+    OpenExternalLink {
+        /// 已由应用层验证为 http(s) 的地址。
+        url: String,
     },
 }
 
@@ -450,14 +547,57 @@ pub trait PlatformServices: Send + Sync {
 
     /// 应用一个已经在领域事务中提交的平台投影。
     fn apply(&self, command: PlatformCommand) -> Result<(), PlatformError>;
+
+    /// 返回 Windows 当前仍持有的 QuickNote 计划通知，用于重启和 Explorer 恢复对账。
+    fn scheduled_notifications(&self) -> Result<Vec<NotificationProjectionKey>, PlatformError>;
+
+    /// 在目标目录先完整写入临时文件，再以平台原子语义替换目标。
+    fn write_file_atomically(&self, target: &Path, contents: &[u8]) -> Result<(), PlatformError>;
+}
+
+/// 供非 Windows adapter 使用的同目录临时写入实现。
+fn portable_atomic_write(target: &Path, contents: &[u8]) -> Result<(), PlatformError> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| PlatformError::new("prepare_atomic_export", "导出目标缺少父目录"))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| PlatformError::new("create_export_directory", error.to_string()))?;
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| PlatformError::new("prepare_atomic_export", "导出文件名无效"))?;
+    let temporary = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    let result = (|| -> Result<(), PlatformError> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|error| PlatformError::new("create_export_temporary", error.to_string()))?;
+        file.write_all(contents)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| PlatformError::new("write_export_temporary", error.to_string()))?;
+        drop(file);
+        fs::rename(&temporary, target)
+            .map_err(|error| PlatformError::new("replace_export_target", error.to_string()))
+    })();
+    if result.is_err() {
+        // 临时路径由本次调用唯一创建，清理不会触碰用户既有目标。
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// 确定性测试 adapter，不模拟 SQLite 或领域规则。
 pub mod test_support {
     use super::{
-        ActivationHandler, ActivationRequest, InstanceLease, InstanceRole, PlatformCommand,
-        PlatformError, PlatformServices,
+        ActivationHandler, ActivationRequest, InstanceLease, InstanceRole,
+        NotificationProjectionKey, PlatformCommand, PlatformError, PlatformServices,
     };
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
@@ -466,7 +606,9 @@ pub mod test_support {
         primary: bool,
         handler: Option<ActivationHandler>,
         commands: Vec<PlatformCommand>,
+        scheduled_notifications: BTreeSet<NotificationProjectionKey>,
         next_apply_error: Option<PlatformError>,
+        next_file_write_error: Option<PlatformError>,
     }
 
     /// 可控制数据目录、激活和平台投影的测试 adapter。
@@ -499,6 +641,28 @@ pub mod test_support {
                 .lock()
                 .map_err(|error| PlatformError::new("configure_test_failure", error.to_string()))?
                 .next_apply_error = Some(PlatformError::new("test_platform_apply", message));
+            Ok(())
+        }
+
+        /// 模拟 Explorer 丢失全部计划通知，领域事实保持不变。
+        pub fn clear_scheduled_notifications(&self) -> Result<(), PlatformError> {
+            self.state
+                .lock()
+                .map_err(|error| PlatformError::new("clear_test_notifications", error.to_string()))?
+                .scheduled_notifications
+                .clear();
+            Ok(())
+        }
+
+        /// 让下一次原子文件写入在接触目标前失败。
+        pub fn fail_next_file_write(
+            &self,
+            message: impl Into<String>,
+        ) -> Result<(), PlatformError> {
+            self.state
+                .lock()
+                .map_err(|error| PlatformError::new("configure_test_failure", error.to_string()))?
+                .next_file_write_error = Some(PlatformError::new("test_atomic_write", message));
             Ok(())
         }
     }
@@ -540,8 +704,61 @@ pub mod test_support {
             if let Some(error) = state.next_apply_error.take() {
                 return Err(error);
             }
+            match &command {
+                PlatformCommand::UpsertNotification {
+                    reminder_id,
+                    trigger_version,
+                    ..
+                } => {
+                    state
+                        .scheduled_notifications
+                        .retain(|key| key.reminder_id != *reminder_id);
+                    state
+                        .scheduled_notifications
+                        .insert(NotificationProjectionKey {
+                            reminder_id: *reminder_id,
+                            trigger_version: *trigger_version,
+                        });
+                }
+                PlatformCommand::CancelNotification {
+                    reminder_id,
+                    trigger_version,
+                } => {
+                    state
+                        .scheduled_notifications
+                        .remove(&NotificationProjectionKey {
+                            reminder_id: *reminder_id,
+                            trigger_version: *trigger_version,
+                        });
+                }
+                _ => {}
+            }
             state.commands.push(command);
             Ok(())
+        }
+
+        fn scheduled_notifications(&self) -> Result<Vec<NotificationProjectionKey>, PlatformError> {
+            self.state
+                .lock()
+                .map(|state| state.scheduled_notifications.iter().copied().collect())
+                .map_err(|error| PlatformError::new("read_test_notifications", error.to_string()))
+        }
+
+        fn write_file_atomically(
+            &self,
+            target: &std::path::Path,
+            contents: &[u8],
+        ) -> Result<(), PlatformError> {
+            if let Some(error) = self
+                .state
+                .lock()
+                .map_err(|error| PlatformError::new("test_atomic_write", error.to_string()))?
+                .next_file_write_error
+                .take()
+            {
+                return Err(error);
+            }
+            super::portable_atomic_write(target, contents)
         }
     }
 
@@ -566,8 +783,9 @@ mod tests {
     use super::test_support::TestPlatformServices;
     use super::{
         ActivationRequest, GlobalShortcut, PRODUCT_IDENTITY, PlatformCommand, PlatformServices,
-        ShortcutKey,
+        ShortcutKey, activation_from_protocol_uri, reminder_protocol_uri,
     };
+    use crate::{ReminderActivation, ReminderActivationAction};
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -632,5 +850,25 @@ mod tests {
         assert!(GlobalShortcut::parse("Shift+Space").is_ok());
         assert!(GlobalShortcut::parse("Ctrl+PageDown").is_ok());
         assert!(GlobalShortcut::parse("Alt+F24").is_ok());
+    }
+
+    #[test]
+    fn reminder_protocol_round_trips_only_the_strict_shape() {
+        let activation = ReminderActivation {
+            activation_key: uuid::Uuid::now_v7().to_string(),
+            reminder_id: uuid::Uuid::now_v7(),
+            trigger_version: 7,
+            action: ReminderActivationAction::Snooze,
+            snooze_minutes: Some(15),
+        };
+        let uri = reminder_protocol_uri(&activation);
+        assert_eq!(
+            activation_from_protocol_uri(&uri),
+            ActivationRequest::Reminder(activation)
+        );
+        assert!(matches!(
+            activation_from_protocol_uri("quicknote://reminder/open?reminder_id=bad"),
+            ActivationRequest::ProtocolUri(_)
+        ));
     }
 }

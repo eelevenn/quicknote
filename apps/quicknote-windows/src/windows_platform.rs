@@ -4,7 +4,9 @@ use quicknote_app::platform::{
     ActivationHandler, ActivationRequest, GlobalShortcut, InstanceLease, InstanceRole,
     PRODUCT_IDENTITY, PlatformCommand, PlatformError, PlatformServices, ShortcutKey,
 };
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation::{
@@ -12,8 +14,8 @@ use windows::Win32::Foundation::{
     GetLastError, HANDLE, INVALID_HANDLE_VALUE, LPARAM, WPARAM,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_MODE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
-    ReadFile, WriteFile,
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_MODE, MOVEFILE_REPLACE_EXISTING,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
@@ -25,11 +27,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
     UnregisterHotKey,
 };
-use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+use windows::Win32::UI::Shell::{SetCurrentProcessExplicitAppUserModelID, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, WM_APP, WM_HOTKEY,
+    GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SW_SHOWNORMAL, WM_APP,
+    WM_HOTKEY,
 };
 use windows::core::{HSTRING, PCWSTR};
+use winreg::RegKey;
+use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
 
 const MUTEX_NAME: &str = "Local\\eelevenn.QuickNote.SingleInstance.v1";
 const PIPE_NAME: &str = r"\\.\pipe\eelevenn.quicknote.activation.v1";
@@ -95,6 +100,55 @@ impl WindowsPlatformServices {
             .map_err(|error| PlatformError::new("lock_global_shortcut", error.to_string()))?;
         if let Some(hotkey) = hotkey.as_ref() {
             hotkey.clear()?;
+        }
+        Ok(())
+    }
+
+    fn set_startup_enabled(&self, enabled: bool) -> Result<(), PlatformError> {
+        let current_user = RegKey::predef(HKEY_CURRENT_USER);
+        let run_key_path = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        if enabled {
+            let (run_key, _) = current_user
+                .create_subkey(run_key_path)
+                .map_err(|error| PlatformError::new("enable_startup", error.to_string()))?;
+            let executable = std::env::current_exe().map_err(|error| {
+                PlatformError::new("resolve_startup_executable", error.to_string())
+            })?;
+            let command = format!("\"{}\" --startup", executable.display());
+            run_key
+                .set_value(PRODUCT_IDENTITY.product_name, &command)
+                .map_err(|error| PlatformError::new("enable_startup", error.to_string()))
+        } else {
+            let run_key = current_user
+                .open_subkey_with_flags(run_key_path, KEY_SET_VALUE)
+                .map_err(|error| PlatformError::new("disable_startup", error.to_string()))?;
+            match run_key.delete_value(PRODUCT_IDENTITY.product_name) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(PlatformError::new("disable_startup", error.to_string())),
+            }
+        }
+    }
+
+    fn open_external_link(url: &str) -> Result<(), PlatformError> {
+        let operation = wide("open");
+        let target = wide(url);
+        // SAFETY: 所有字符串在同步 ShellExecuteW 调用期间保持 NUL 结尾且有效。
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(target.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if result.0 as isize <= 32 {
+            return Err(PlatformError::new(
+                "open_external_link",
+                format!("ShellExecuteW 返回错误代码 {}", result.0 as isize),
+            ));
         }
         Ok(())
     }
@@ -167,12 +221,68 @@ impl PlatformServices for WindowsPlatformServices {
                 self.replace_global_shortcut(shortcut)
             }
             PlatformCommand::ClearGlobalShortcut => self.clear_global_shortcut(),
-            // 提醒、托盘和自启动仍由各自后续纵向切片实现。
+            PlatformCommand::SetStartupEnabled { enabled } => self.set_startup_enabled(enabled),
+            PlatformCommand::OpenExternalLink { url } => Self::open_external_link(&url),
+            // 提醒与托盘由后续纵向切片实现。
             other => Err(PlatformError::new(
                 "apply_platform_command",
                 format!("平台命令尚未接入生产实现：{other:?}"),
             )),
         }
+    }
+
+    fn scheduled_notifications(
+        &self,
+    ) -> Result<Vec<quicknote_app::platform::NotificationProjectionKey>, PlatformError> {
+        // #19 只保留提醒领域数据；Windows 计划投影由后续提醒切片接入。
+        Ok(Vec::new())
+    }
+
+    fn write_file_atomically(&self, target: &Path, contents: &[u8]) -> Result<(), PlatformError> {
+        let parent = target
+            .parent()
+            .ok_or_else(|| PlatformError::new("prepare_atomic_export", "导出目标缺少父目录"))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| PlatformError::new("create_export_directory", error.to_string()))?;
+        let file_name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| PlatformError::new("prepare_atomic_export", "导出文件名无效"))?;
+        let temporary = parent.join(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let result = (|| -> Result<(), PlatformError> {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)
+                .map_err(|error| {
+                    PlatformError::new("create_export_temporary", error.to_string())
+                })?;
+            file.write_all(contents)
+                .and_then(|_| file.sync_all())
+                .map_err(|error| PlatformError::new("write_export_temporary", error.to_string()))?;
+            drop(file);
+
+            let source = wide_path(&temporary)?;
+            let destination = wide_path(target)?;
+            // SAFETY: 路径在同步调用期间保持 NUL 结尾；标志提供替换与落盘语义。
+            unsafe {
+                MoveFileExW(
+                    PCWSTR(source.as_ptr()),
+                    PCWSTR(destination.as_ptr()),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            }
+            .map_err(|error| PlatformError::new("replace_export_target", error.to_string()))
+        })();
+        if result.is_err() {
+            // 临时路径由本次调用唯一创建，失败清理不会修改既有目标。
+            let _ = fs::remove_file(&temporary);
+        }
+        result
     }
 }
 
@@ -541,6 +651,13 @@ fn send_pipe_message(payload: &[u8]) -> Result<(), PlatformError> {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn wide_path(path: &Path) -> Result<Vec<u16>, PlatformError> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| PlatformError::new("encode_windows_path", "路径不是有效 Unicode"))?;
+    Ok(wide(value))
 }
 
 #[cfg(test)]
