@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "packageId": "sensevoice-2024-07-17-sherpa-1.13.5",
+  "displayName": "SenseVoice-Small INT8 本地转写包",
+  "modelVersion": "2024-07-17",
+  "runtimeVersion": "v1.13.5",
+  "sidecarProtocolVersion": 1,
+  "runtimeBin": "runtime/sherpa-onnx-v1.13.5-win-x64-shared-MT-Release-no-tts/lib",
+  "sidecarFile": "quicknote-sensevoice-sidecar.exe",
+  "modelFile": "model/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/model.int8.onnx",
+  "tokensFile": "model/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/tokens.txt",
+  "qualityRisk": "人工盲评已证明一次可用率最终理论上限只有 79%，低于原 90% 发布门槛。",
+  "assets": [
+    {
+      "name": "sherpa-onnx-runtime",
+      "version": "v1.13.5",
+      "sourceCommit": "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.5/sherpa-onnx-v1.13.5-win-x64-shared-MT-Release-no-tts.tar.bz2",
+      "fileName": "sherpa-onnx-v1.13.5-win-x64-shared-MT-Release-no-tts.tar.bz2",
+      "installDirectory": "runtime",
+      "compressedBytes": 22925630,
+      "extractedBytes": 62645394,
+      "sha256": "7c9dbcd3d38f71e2ee25dafc270e91d30f0684be8526c3c19cac1aedb073033d",
+      "license": "Apache-2.0",
+      "licenseStatus": "人工复核 sherpa-onnx 及随附第三方 notices 后方可发布"
+    },
+    {
+      "name": "sensevoice-small-int8-model",
+      "version": "2024-07-17",
+      "sourceCommit": null,
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+      "fileName": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+      "installDirectory": "model",
+      "compressedBytes": 163002883,
+      "extractedBytes": 240506435,
+      "sha256": "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
+      "license": "FunASR Model Open Source License 1.1",
+      "licenseStatus": "SenseVoice ONNX 转换物商业再分发链仍需人工复核"
+    }
+  ],
+  "verifiedFiles": [
+    {
+      "path": "model/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/model.int8.onnx",
+      "bytes": 239233841,
+      "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"
+    },
+    {
+      "path": "model/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/tokens.txt",
+      "bytes": 315894,
+      "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc"
+    }
+  ]
+}

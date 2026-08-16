@@ -10,6 +10,7 @@ mod interface;
 mod markdown;
 pub mod platform;
 mod storage;
+pub mod transcription;
 
 pub use error::ApplicationError;
 pub use interface::{
