@@ -1,0 +1,27 @@
+[package]
+name = "quicknote-ui"
+description = "QuickNote 可复用 Slint UI 骨架"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+slint = { version = "1.17.1", default-features = false, features = [
+    "compat-1-2",
+    "renderer-software",
+    "std",
+] }
+
+[features]
+default = []
+# 桌面壳显式启用 winit；共享 UI 本身不绑定 Windows。
+desktop-windows = ["slint/accessibility", "slint/backend-winit"]
+
+[build-dependencies]
+slint-build = "1.17.1"
+
+[lints]
+workspace = true

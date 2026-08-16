@@ -1,0 +1,13 @@
+# Rust 构建产物。
+/target/
+/artifacts/
+
+# 本地应用数据和临时验证文件。
+/.quicknote-data/
+*.db-wal
+*.db-shm
+
+# 编辑器和操作系统文件。
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shared-core:
+    name: Shared core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Check platform-neutral application module
+        run: cargo check --locked --package quicknote-app --no-default-features
+      - name: Lint shared crates
+        run: cargo clippy --locked --workspace --exclude quicknote-windows --all-targets -- -D warnings
+      - name: Test shared crates
+        run: cargo test --locked --workspace --exclude quicknote-windows
+
+  windows-release:
+    name: Windows Release x64
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+          targets: x86_64-pc-windows-msvc
+      - name: Build production shell
+        shell: pwsh
+        run: .\scripts\build-windows.ps1
+      - name: Test complete workspace
+        run: cargo test --locked --workspace
