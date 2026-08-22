@@ -26,12 +26,12 @@ All people assigned to these roles must keep multi-factor authentication enabled
 - Release artifacts must be built by the repository's pinned GitHub Actions workflow from a version tag whose source is public and reviewable.
 - Build scripts, dependency locks and workflow changes are part of the reviewed source.
 - Only binaries built from QuickNote-owned source may be submitted under the QuickNote signing policy.
-- Upstream runtime or model artifacts must not be signed as though they were produced by QuickNote.
+- Upstream artifacts must not be signed as though they were produced by QuickNote.
 - Product name and version metadata must agree across every artifact in one release.
 - SHA-256 hashes and signature verification results must be published with each signed release.
 - Every signing request requires manual approval; local or unverifiable binaries are not eligible.
 
-The intended signed artifacts are the QuickNote Windows executable, the QuickNote-owned SenseVoice sidecar executable and the per-user MSI installer. The optional upstream transcription runtime and model are downloaded separately and are not part of the MSI.
+The intended signed artifacts are the QuickNote Windows executable and the per-user MSI installer. QuickNote v0.1.0 does not distribute a speech model, transcription runtime or sidecar.
 
 ## Reporting concerns
 

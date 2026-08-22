@@ -25,7 +25,7 @@
 - 产品名 `QuickNote`、AUMID `eelevenn.QuickNote`、协议 `quicknote:`，见 [`PRODUCT_IDENTITY`](../../crates/quicknote-app/src/platform.rs)。
 - 应用数据目录为 `%LOCALAPPDATA%\QuickNote`，与安装目录分离；通知 AUMID、COM 激活、协议、开始菜单快捷方式和登录启动均使用当前用户注册表或用户目录，见 [`WindowsPlatformServices`](../../apps/quicknote-windows/src/windows_platform.rs)。
 - 快捷键和登录启动偏好保存在 SQLite；数据库迁移前创建一致备份，迁移失败回滚 schema 并保留备份，见 [ADR 0003](../adr/0003-sqlite-storage-and-versioned-exports.md)。
-- [Issue 21 发布门槛](../release-gates/issue-21-local-transcription.md)记录的旧 Release 应用为 `13,033,984` 字节、转写 sidecar 为 `289,792` 字节。静态 CRT 与卸载清理落地后的当前应用为 `13,232,128` 字节，sidecar 仍为 `289,792` 字节；主 MSI 只包含应用本体，sidecar 与约 `177.3 MiB` 的本地转写包继续按需单独分发。
+- [Issue 21 历史证据](../release-gates/issue-21-local-transcription.md)记录过语音实现的独立体积。ADR-0004 已将语音移出 v0.1.0；生产安装和签名范围只包含应用本体与 MSI。
 
 ## 逐项比较
 
@@ -88,7 +88,7 @@ QuickNote 应先采用 `afterInstallInitialize`：旧产品的移除发生在安
 | 资源 | 所有者 | 升级 | 显式卸载 |
 | --- | --- | --- | --- |
 | `%LOCALAPPDATA%\Programs\QuickNote` 中已发布二进制与 notices | MSI | 事务替换 | 删除 |
-| `%LOCALAPPDATA%\QuickNote` 中 SQLite、备份、诊断、转写包 | 应用/用户 | 原样保留 | 默认保留 |
+| `%LOCALAPPDATA%\QuickNote` 中 SQLite、备份和诊断 | 应用/用户 | 原样保留 | 默认保留 |
 | 用户自行选择的导出文件 | 用户 | 不触碰 | 不触碰 |
 | AUMID、协议、COM 激活与开始菜单快捷方式 | MSI | 以相同身份重建 | 删除 |
 | SQLite 中的快捷键与登录启动偏好 | 应用/用户 | 原样保留 | 默认保留 |
@@ -106,19 +106,19 @@ MSI 不得为 `%LOCALAPPDATA%\QuickNote` 创作 `File`、通配 `RemoveFile`、�
 MSI 与 EXE 在签名能力上没有决定性差异。生产要求应统一为：
 
 1. 使用经身份验证、链到受信任根的正式 Authenticode 代码签名身份：合资格时可用 Microsoft Artifact Signing，否则使用受信 CA 的 OV/EV 代码签名证书；自签名证书不合格。Microsoft 当前说明有效 OV/EV 会显示已验证发布者，但新文件或新发布者即使已签名仍可能在 SmartScreen 积累信誉前显示“无法识别”警告；EV 已不再自动绕过该警告。[SmartScreen 信誉](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)
-2. 先签 `QuickNote.exe`、sidecar 和所有随安装交付的可执行文件，再生成并签最终 MSI。WiX 官方说明：cab 内嵌时只需签 MSI 即可覆盖 cabinet 完整性，但这不替代对安装后独立 EXE 的签名。[WiX 签名流程](https://docs.firegiant.com/wix/tools/signing/)
+2. 先签 `QuickNote.exe`，再生成并签最终 MSI。WiX 官方说明：cab 内嵌时只需签 MSI 即可覆盖 cabinet 完整性，但这不替代对安装后独立 EXE 的签名。[WiX 签名流程](https://docs.firegiant.com/wix/tools/signing/)
 3. 使用 SHA-256 文件摘要与 RFC 3161 SHA-256 时间戳，即 SignTool 的 `/fd SHA256 /tr <timestamp-url> /td SHA256`。Microsoft 说明时间戳用于在签名证书过期后维持长期有效性，并不应再用 SHA-1 作为新发布的唯一算法。[Authenticode 时间戳](https://learn.microsoft.com/en-us/windows/win32/seccrypto/time-stamping-authenticode-signatures)
 4. 发布门禁对每个 EXE 和 MSI 执行 `signtool verify /pa /all /v <file>`，失败或警告均阻止发布；`/pa` 使用默认 Authenticode 验证策略。[SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool) 同时在文件属性、SmartScreen 提示和“已安装的应用”中人工核对预期发布者文本。
 5. 所有版本使用同一验证后的发布者身份，保护私钥或仅授予 CI 最小签名权限；签名后不再修改产物。若使用 Artifact Signing，官方说明它可签 SignTool 支持的文件，并给出 `/pa` 验证方式。[Artifact Signing FAQ](https://learn.microsoft.com/en-us/azure/artifact-signing/faq)
 
 ## 体积与运行时判断
 
-当前主 MSI 只包含约 `12.62 MiB` 的应用 EXE，sidecar 和模型/runtime 下载包明确排除在外。纯 MSI 只增加安装数据库、嵌入 cabinet 和签名；WiX 支持 `high` 等 cabinet 压缩等级。[WiX MSBuild 属性](https://docs.firegiant.com/wix/tools/msbuild/) 当前 unsigned MSI 实测为 `5,431,296` 字节，但最终门槛仍必须由正式签名后的 MSI 证明。
+当前主 MSI 只包含应用 EXE。纯 MSI 只增加安装数据库、嵌入 cabinet 和签名；WiX 支持 `high` 等 cabinet 压缩等级。[WiX MSBuild 属性](https://docs.firegiant.com/wix/tools/msbuild/) 当前 unsigned MSI 实测为 `5,431,296` 字节，但最终门槛仍必须由本次范围收缩后的正式签名 MSI 重新证明。
 
 应同时记录三组互不混淆的数字：
 
 - 正式签名 MSI 的精确字节数及 MiB；
-- 安装目录中应用本体、sidecar、notices 等的精确总字节数；
+- 安装目录中应用本体和 notices 等的精确总字节数；
 - Windows 11 自带的共享系统运行时清单，不把它们计入安装目录，也不宣称为 QuickNote 自带。
 
 不要加 Burn EXE：当前没有需要链式安装的前置包，Burn 会增加新的可执行层、缓存、签名步骤和故障面。WiX 文档也说明 Burn bundle 需要分别签提取出的 engine 和最终 bundle。[Burn 签名](https://docs.firegiant.com/wix/tools/signing/#signing-bundles)
@@ -129,7 +129,7 @@ WiX 的 .NET SDK/命令行工具是**构建依赖**，不是用户机器依赖�
 
 中央部署 `vc_redist.x64.exe` 写入系统目录并要求管理员权限，与“每用户无提权”冲突；官方允许 app-local 或静态链接，但 QuickNote 将承担安全更新服务责任，Microsoft 也建议优先动态链接。[部署方式比较](https://learn.microsoft.com/en-us/cpp/windows/choosing-a-deployment-method?view=msvc-170)
 
-最小实验现已落地：Rust + Slint 使用 `crt-static`，C++ sidecar 显式使用 `/MT`；自动化 `dumpbin /dependents` 门禁确认两者均不导入 `VCRUNTIME`、`MSVCP` 或 `CONCRT` DLL。20 次冷启动、50 次热快捷键和 10 次后台内存样本在当前开发机通过硬预算，但最终仍须在无 VC Redist 假设的干净 VM 上复核。**不得链式运行需提权的 VC Redist，也不得把开发机结果冒充干净系统结果。**
+最小实验现已落地：Rust + Slint 使用 `crt-static`；自动化 `dumpbin /dependents` 门禁确认应用不导入 `VCRUNTIME`、`MSVCP` 或 `CONCRT` DLL。20 次冷启动、50 次热快捷键和 10 次后台内存样本在当前开发机通过硬预算，但范围收缩后的最终产物仍须在无 VC Redist 假设的干净 VM 上复核。**不得链式运行需提权的 VC Redist，也不得把开发机结果冒充干净系统结果。**
 
 另有一项非技术门槛：WiX 当前官方仓库说明，产生收入的使用需要 Open Source Maintenance Fee。QuickNote 在采用前应由人工确认适用性并留存结论。[WiX 官方 README](https://github.com/wixtoolset/wix/blob/main/README.md#open-source-maintenance-fee)
 
@@ -145,10 +145,10 @@ WiX 的 .NET SDK/命令行工具是**构建依赖**，不是用户机器依赖�
 | 升级失败 | 在复制、移除旧产品和提交阶段分别注入磁盘满、访问拒绝、进程强杀 | 安装返回失败；旧版本签名文件、快捷方式、协议与卸载入口恢复并可启动；数据库未被安装器改写；日志能定位阶段。 |
 | 突然中断 | VM 快照上在上述阶段断电并重启 | Windows Installer 完成恢复后旧版本可运行，或给出可自动/明确执行的恢复路径；不得处于无版本可用状态。 |
 | 迁移失败 | MSI 成功后在首次启动注入 SQLite migration 失败 | 旧 schema 回滚，诊断备份保留，应用拒绝危险写入；这项由应用证据而非 MSI rollback 冒充通过。 |
-| 显式卸载 | 从 Windows“已安装的应用”卸载 | 安装文件、开始菜单、协议、COM、AUMID 投影、Run 投影、卸载登记和系统计划通知清理；`%LOCALAPPDATA%\QuickNote` 数据库/备份/转写包及用户导出保留。 |
+| 显式卸载 | 从 Windows“已安装的应用”卸载 | 安装文件、开始菜单、协议、COM、AUMID 投影、Run 投影、卸载登记和系统计划通知清理；`%LOCALAPPDATA%\QuickNote` 数据库、备份及用户导出保留。 |
 | 卸载后重装 | 完成上一项后重装同版或新版 | 应用重新使用保留数据库并重新投影提醒；没有重复快捷方式、协议键、卸载登记或通知身份。 |
 | 签名 | 对下载产物和安装后所有 PE/MSI 执行 SignTool 验证 | `/pa /all /v` 成功；发布者完全匹配批准名称；带 RFC 3161 时间戳；SmartScreen 实际表现单独记录，不把“已签名”等同于“必无警告”。 |
-| 大小/依赖 | 对最终签名产物和实际安装树计数，并在未安装 VC Redist 的干净 VM 启动 | MSI `<= 18 MiB`，安装后应用本体 `<= 45 MiB`；Windows Installer/UCRT 等共享系统 runtime 另表报告；`VCRUNTIME140.dll` 已通过静态 CRT 或经许可的 app-local 部署解决；按需语音包不混入安装器。 |
+| 大小/依赖 | 对最终签名产物和实际安装树计数，并在未安装 VC Redist 的干净 VM 启动 | MSI `<= 18 MiB`，安装后应用本体 `<= 45 MiB`；Windows Installer/UCRT 等共享系统 runtime 另表报告；`VCRUNTIME140.dll` 已通过静态 CRT 或经许可的 app-local 部署解决。 |
 
 ## 最终建议
 

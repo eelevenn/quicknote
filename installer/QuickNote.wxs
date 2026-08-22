@@ -56,7 +56,7 @@
         Id="QuickNoteExecutableComponent"
         Guid="{91319713-8ADA-4474-AC52-B7AEC90703D3}"
         Bitness="always64">
-        <!-- 主安装器只包含应用本体；本地转写包继续按需单独下载和计量。 -->
+        <!-- MVP 安装器只包含 QuickNote 应用本体。 -->
         <File
           Id="QuickNoteExecutable"
           Source="$(var.QuickNoteExecutable)"

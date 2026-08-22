@@ -33,18 +33,17 @@ if ($Version -ne $applicationVersion) {
     throw "发布版本 $Version 与应用版本 $applicationVersion 不一致；请先更新 workspace 版本。"
 }
 
-# 发布候选严格按“构建载荷 -> 签全部 PE -> 构建 MSI -> 签 MSI -> 验证”排序。
+# 发布候选严格按“构建应用 -> 签 EXE -> 构建 MSI -> 签 MSI -> 验证”排序。
 & (Join-Path $PSScriptRoot 'build-windows.ps1')
 $executable = Join-Path $repositoryRoot 'target\x86_64-pc-windows-msvc\release\quicknote-windows.exe'
-$sidecar = Join-Path $repositoryRoot 'target\x86_64-pc-windows-msvc\release\quicknote-sensevoice-sidecar.exe'
 & (Join-Path $PSScriptRoot 'Sign-QuickNoteArtifacts.ps1') `
-    -Path @($executable, $sidecar) `
+    -Path $executable `
     -CertificateThumbprint $CertificateThumbprint `
     -TimestampUrl $TimestampUrl
 
 # 在创建 MSI 前阻止重新引入需要管理员安装的 VC Runtime 依赖。
 & (Join-Path $PSScriptRoot 'Test-WindowsRuntimeDependencies.ps1') `
-    -Path @($executable, $sidecar) `
+    -Path $executable `
     -OutputDirectory $OutputDirectory
 
 & (Join-Path $PSScriptRoot 'Build-QuickNoteInstaller.ps1') `
@@ -75,12 +74,6 @@ $manifest = [ordered]@{
         path = $executable
         bytes = (Get-Item -LiteralPath $executable).Length
         sha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-    }
-    transcription_sidecar = [ordered]@{
-        path = $sidecar
-        bytes = (Get-Item -LiteralPath $sidecar).Length
-        sha256 = (Get-FileHash -LiteralPath $sidecar -Algorithm SHA256).Hash.ToLowerInvariant()
-        distribution = 'separate on-demand transcription package; excluded from MSI'
     }
     signing_certificate_thumbprint = $CertificateThumbprint.ToUpperInvariant()
     timestamp_url = $TimestampUrl
