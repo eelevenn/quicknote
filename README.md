@@ -2,6 +2,8 @@
 
 QuickNote 是面向 Windows 11 的本地优先快速记录应用。生产实现采用 Rust、Slint 与 bundled SQLite；Windows 能力由窄 `PlatformServices` seam 隔离，共享应用模块不依赖 Win32。
 
+QuickNote 自有源代码采用 [MIT License](LICENSE)。发布和使用前请同时阅读[隐私说明](PRIVACY.md)、[第三方组件说明](THIRD_PARTY_NOTICES.md)与[代码签名政策](CODE_SIGNING_POLICY.md)。项目正在准备申请 SignPath Foundation 免费开源代码签名；获批前的任何构建都不代表已经由 SignPath Foundation 签名。
+
 ## 工程结构
 
 - `crates/quicknote-app`：平台中立的深应用模块，包含命令/查询接口、SQLite 单写者、schema 与迁移。

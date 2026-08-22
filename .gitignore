@@ -4,6 +4,9 @@
 
 # 本地应用数据和临时验证文件。
 /.quicknote-data/
+.env
+.env.*
+!.env.example
 *.db-wal
 *.db-shm
 
