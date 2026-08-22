@@ -25,9 +25,11 @@ $untrackedChanges = & git @gitCompatibility -C $repositoryRoot ls-files --others
 if ($LASTEXITCODE -ne 0) {
     throw '无法读取 Git 工作树状态。'
 }
-$dirtyEntries = @($trackedChanges) + @($stagedChanges) + @($untrackedChanges) |
-    Where-Object { $_ } |
-    Sort-Object -Unique
+$dirtyEntries = @(
+    @($trackedChanges) + @($stagedChanges) + @($untrackedChanges) |
+        Where-Object { $_ } |
+        Sort-Object -Unique
+)
 if ($dirtyEntries.Count -gt 0) {
     throw "未签名预览只能从干净的 Git 工作树构建：$($dirtyEntries -join ', ')"
 }
