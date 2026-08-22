@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// ASCII `QN01`，作为所有生产数据库的固定 SQLite 身份。
 pub(crate) const APPLICATION_ID: i32 = 0x514E_3031;
 /// 当前客户端能够完整读写的最高 schema 版本。
-pub(crate) const SUPPORTED_SCHEMA_VERSION: i32 = 3;
+pub(crate) const SUPPORTED_SCHEMA_VERSION: i32 = 4;
 
 /// 仅由模块内测试使用的确定性迁移故障点。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,6 +166,11 @@ fn migrate(
     if from_version < 3 {
         transaction
             .execute_batch(SCHEMA_V3)
+            .map_err(|error| error.to_string())?;
+    }
+    if from_version < 4 {
+        transaction
+            .execute_batch(SCHEMA_V4)
             .map_err(|error| error.to_string())?;
     }
 
@@ -345,4 +350,41 @@ CREATE TABLE IF NOT EXISTS note_backup_history (
     PRIMARY KEY(note_id, content_revision),
     FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE
 ) STRICT;
+"#;
+
+const SCHEMA_V4: &str = r#"
+-- 外部内容 FTS5 trigram 索引保留 notes 作为唯一正文事实源，并加速文字子串搜索。
+CREATE VIRTUAL TABLE note_search USING fts5(
+    derived_title,
+    body,
+    content='notes',
+    content_rowid='rowid',
+    tokenize='trigram'
+);
+
+CREATE TRIGGER note_search_after_insert
+AFTER INSERT ON notes
+BEGIN
+    INSERT INTO note_search(rowid, derived_title, body)
+    VALUES (NEW.rowid, NEW.derived_title, NEW.body);
+END;
+
+CREATE TRIGGER note_search_after_delete
+AFTER DELETE ON notes
+BEGIN
+    INSERT INTO note_search(note_search, rowid, derived_title, body)
+    VALUES ('delete', OLD.rowid, OLD.derived_title, OLD.body);
+END;
+
+CREATE TRIGGER note_search_after_content_update
+AFTER UPDATE OF derived_title, body ON notes
+BEGIN
+    INSERT INTO note_search(note_search, rowid, derived_title, body)
+    VALUES ('delete', OLD.rowid, OLD.derived_title, OLD.body);
+    INSERT INTO note_search(rowid, derived_title, body)
+    VALUES (NEW.rowid, NEW.derived_title, NEW.body);
+END;
+
+-- 迁移既有正文；后续变更由同一事务内的触发器同步。
+INSERT INTO note_search(note_search) VALUES ('rebuild');
 "#;

@@ -42,10 +42,10 @@ SignPath Foundation 要求申请项目已经公开发布需要签名的二进制
 
 2026-08-23 在 Windows build 26200、12 个逻辑处理器的当前开发机，对 ADR-0004 范围收缩后的产物完成以下自动验证：
 
-- 静态 CRT Release 应用为 `12,768,768` 字节，SHA-256 为 `95a839646c3516d031bde398a47b010aa561481c72e04551b958ed0000f934f2`；`dumpbin /dependents` 未发现 `VCRUNTIME`、`MSVCP` 或 `CONCRT` 动态导入。
-- unsigned MSI 为 `5,271,552` 字节，SHA-256 为 `d6768bf0ab269fc6399ae690ec997d97b9de1e9b40d8d1e881622b6e4e46e9d4`，ProductCode `{D3B322C4-511A-5FE7-A5EE-C653F511F6DC}`；per-user、稳定身份和 18 MiB 静态门禁通过。
-- 20 次冷启动 P95 为 `380.799 ms`，50 次真实全局快捷键热启动 P95 为 `86.242 ms`，10 次稳定后台完整进程树私有工作集 P95 为 `2,990,080` 字节。
-- Release profile 的 10,000 张、100 MiB 英文正文子串搜索为 `529 ms`，结果正确且无截断，但超过 #11 的 `200 ms` 硬门槛；优化与多轮 P95 证据由 [Issue 33](https://github.com/eelevenn/quicknote/issues/33) 跟踪。首页、切换、保存和导出仍需目标机端到端证据。
+- 静态 CRT Release 应用为 `12,773,888` 字节，SHA-256 为 `37ec9540ec1ba51c0bc568efec9559a0ac1f7764f00d43fe3db1a9bca1861f01`；`dumpbin /dependents` 未发现 `VCRUNTIME`、`MSVCP` 或 `CONCRT` 动态导入。
+- unsigned MSI 为 `5,275,648` 字节，SHA-256 为 `280498ceb2b6680535a5f7a2eef06a7b0eda001d7194f5ba929eb2e029b81c99`，ProductCode `{D3B322C4-511A-5FE7-A5EE-C653F511F6DC}`；per-user、稳定身份和 18 MiB 静态门禁通过。
+- 20 次冷启动 P95 为 `403.113 ms`，50 次真实全局快捷键热启动 P95 为 `85.547 ms`，10 次稳定后台完整进程树私有工作集 P95 为 `3,022,848` 字节。
+- Release profile 的 10,000 张、100 MiB 英文正文子串搜索运行 20 次，P95 为 `1.426 ms`；英文大小写、中文、文字 `%`/`_`/反斜杠/引号、活跃与归档范围、排除回收站和无截断合同均通过。优化与原始样本由 [Issue 33](https://github.com/eelevenn/quicknote/issues/33) 跟踪。首页、切换、保存和导出仍需目标机端到端证据。
 
 这些数字只证明实现和测量链路可运行。MSI 尚未正式签名，开发机也不是规定的 4 逻辑核心、8 GiB 干净系统，因此发布矩阵仍保持未通过。
 
@@ -114,7 +114,7 @@ SignPath Foundation 要求申请项目已经公开发布需要签名的二进制
   -ExecutablePath .\target\x86_64-pc-windows-msvc\release\quicknote-windows.exe `
   -ColdRuns 20 -HotRuns 50 -MemorySamples 10 -IdleSeconds 30
 
-cargo test -p quicknote-app --test search_scale -- --ignored --nocapture
+cargo test --locked --release -p quicknote-app --test search_scale -- --ignored --nocapture
 ```
 
 上述命令不能替代以下人工工作：
