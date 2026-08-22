@@ -171,7 +171,7 @@ function Wait-ForEditableControlHidden {
 function Get-QuickNoteProcessTree {
     param([int]$RootProcessId)
 
-    # 单次抓取进程表后递归扩展 PID 集合，避免漏算 sidecar 等后代进程。
+    # 单次抓取进程表后递归扩展 PID 集合，避免漏算应用启动的后代进程。
     $processes = @(Get-CimInstance -ClassName Win32_Process)
     $ids = [Collections.Generic.HashSet[int]]::new()
     [void]$ids.Add($RootProcessId)

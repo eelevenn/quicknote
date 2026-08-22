@@ -3,23 +3,14 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[cfg(windows)]
-mod transcription;
-#[cfg(windows)]
 mod windows_platform;
 
-#[cfg(windows)]
-use self::transcription::{PackageController, PackageEvent, VoiceController, VoiceEvent};
 #[cfg(windows)]
 use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
 #[cfg(windows)]
 use quicknote_app::platform::{
     ActivationRequest, InstanceRole, PRODUCT_IDENTITY, PlatformServices,
     activation_from_protocol_uri,
-};
-#[cfg(windows)]
-use quicknote_app::transcription::{
-    PackageManifest, PackageStatus, TranscriptionPreview, TranscriptionState, TranscriptionTarget,
-    insert_at_frozen_offset,
 };
 #[cfg(windows)]
 use quicknote_app::{
@@ -45,10 +36,6 @@ use std::rc::Rc;
 use windows::Win32::Foundation::HWND;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic, SetForegroundWindow};
-
-#[cfg(windows)]
-const TRANSCRIPTION_QUALITY_RISK: &str =
-    "SenseVoice 人工一次可用率理论上限为 79%，请在插入前检查文字。";
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -80,22 +67,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 只有主实例会打开 SQLite、启动自动保存协调器和创建窗口。
-    let data_directory = platform.data_directory()?;
     let application = Rc::new(Application::open(ApplicationConfig::new(
-        data_directory.clone(),
+        platform.data_directory()?,
     ))?);
     let main_window = MainWindow::new()?;
     let quick_capture = QuickCaptureWindow::new()?;
     main_window.set_application_version(SharedString::from(env!("CARGO_PKG_VERSION")));
-    let package_controller = Rc::new(PackageController::new(&data_directory)?);
-    let voice_controller = Rc::new(VoiceController::new(&data_directory)?);
-    let transcription_preview = Rc::new(RefCell::new(None::<TranscriptionPreview>));
-    main_window.set_transcription_risk(SharedString::from(TRANSCRIPTION_QUALITY_RISK));
-    quick_capture.set_transcription_risk(SharedString::from(TRANSCRIPTION_QUALITY_RISK));
-    main_window.set_transcription_package_busy(true);
-    quick_capture.set_transcription_package_busy(true);
-    main_window.set_transcription_package_status(SharedString::from("正在校验本地转写包"));
-    package_controller.refresh_status()?;
     let initial_editor = application.editing_snapshot()?;
     set_editor_document(&main_window, &quick_capture, &initial_editor);
     application.coordinate_reminders(&platform, None, ReminderCoordinationReason::Startup)?;
@@ -127,15 +104,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Rc::clone(&application),
         platform.clone(),
     );
-    wire_transcription_callbacks(
-        &main_window,
-        &quick_capture,
-        Rc::clone(&application),
-        platform.clone(),
-        Rc::clone(&package_controller),
-        Rc::clone(&voice_controller),
-        Rc::clone(&transcription_preview),
-    );
     route_activation(
         &main_window,
         &quick_capture,
@@ -155,9 +123,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let timer_platform = platform.clone();
     let last_timing = Rc::new(RefCell::new(None::<NoteTiming>));
     let timing_cache = Rc::clone(&last_timing);
-    let timer_package_controller = Rc::clone(&package_controller);
-    let timer_voice_controller = Rc::clone(&voice_controller);
-    let timer_transcription_preview = Rc::clone(&transcription_preview);
     activation_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
         let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) else {
             return;
@@ -171,33 +136,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 activation,
             );
         }
-        if timer_voice_controller.is_recording()
-            && let Ok(snapshot) = timer_application.editing_snapshot()
-        {
-            // 每个 UI tick 更新候选；显式停止仍会在回调中提交精确的最终光标。
-            // SAFETY: GetForegroundWindow 只返回当前前台窗口句柄，不借用窗口。
-            let foreground = unsafe { GetForegroundWindow() };
-            let byte_offset = if window_hwnd(capture.window()) == Some(foreground) {
-                Some(capture.get_editor_cursor_byte_offset())
-            } else if window_hwnd(main.window()) == Some(foreground) {
-                Some(main.get_editor_cursor_byte_offset())
-            } else {
-                None
-            };
-            if let Some(byte_offset) = byte_offset {
-                let _ = timer_voice_controller.refresh_target(TranscriptionTarget {
-                    note_id: snapshot.note_id,
-                    byte_offset: byte_offset.max(0) as usize,
-                });
-            }
-        }
-        sync_transcription_events(
-            &main,
-            &capture,
-            &timer_package_controller,
-            &timer_voice_controller,
-            &timer_transcription_preview,
-        );
         // 只同步保存反馈和摘要，不重设可见 TextEdit 的正文或选择范围。
         if let Ok(snapshot) = timer_application.editing_snapshot() {
             let mut cached = timer_snapshot_cache.borrow_mut();
@@ -245,15 +183,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     slint::run_event_loop_until_quit()?;
-    // 正常退出先收回下载、录音和 sidecar，临时文件由操作守卫清理。
-    package_controller.cancel();
-    voice_controller.cancel();
-    let shutdown_deadline = std::time::Instant::now() + Duration::from_secs(35);
-    while (package_controller.is_busy() || voice_controller.is_busy())
-        && std::time::Instant::now() < shutdown_deadline
-    {
-        std::thread::sleep(Duration::from_millis(25));
-    }
     // 非按钮路径结束事件循环时仍做一次尽力刷新；交互路径会在退出前阻止失败。
     let _ = application.edit(EditorIntent::Flush);
     Ok(())
@@ -760,423 +689,6 @@ fn wire_settings_callbacks(
             }
         }
     });
-}
-
-#[cfg(windows)]
-#[allow(clippy::too_many_arguments)]
-fn wire_transcription_callbacks(
-    main: &MainWindow,
-    capture: &QuickCaptureWindow,
-    application: Rc<Application>,
-    platform: windows_platform::WindowsPlatformServices,
-    packages: Rc<PackageController>,
-    voice: Rc<VoiceController>,
-    preview: Rc<RefCell<Option<TranscriptionPreview>>>,
-) {
-    let main_weak = main.as_weak();
-    main.on_open_transcription_packages(move || {
-        let Some(main) = main_weak.upgrade() else {
-            return;
-        };
-        match PackageManifest::bundled() {
-            Ok(manifest) => {
-                let licenses = manifest
-                    .assets
-                    .iter()
-                    .map(|asset| {
-                        format!(
-                            "{}：{}（{}）",
-                            asset.name, asset.license, asset.license_status
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("；");
-                main.set_action_status(SharedString::from(format!(
-                    "固定包 {}：模型 {}，运行时 {}，下载 {:.1} MiB，解压 {:.1} MiB。许可证：{}",
-                    manifest.package_id,
-                    manifest.model_version,
-                    manifest.runtime_version,
-                    mib(manifest.compressed_bytes()),
-                    mib(manifest.extracted_bytes()),
-                    licenses
-                )));
-            }
-            Err(error) => main.set_action_status(SharedString::from(error.to_string())),
-        }
-    });
-
-    let main_weak = main.as_weak();
-    let packages_for_install = Rc::clone(&packages);
-    let voice_for_install = Rc::clone(&voice);
-    let install_platform = platform.clone();
-    main.on_install_transcription_package(move || {
-        let Some(main) = main_weak.upgrade() else {
-            return;
-        };
-        if voice_for_install.is_busy() {
-            main.set_transcription_package_status(SharedString::from("请先结束当前语音输入"));
-            return;
-        }
-        main.set_transcription_package_busy(true);
-        main.set_transcription_package_status(SharedString::from("正在准备固定本地转写包"));
-        if let Err(error) = packages_for_install.start(install_platform.clone(), false) {
-            main.set_transcription_package_busy(false);
-            main.set_transcription_package_status(SharedString::from(error.to_string()));
-        }
-    });
-
-    let main_weak = main.as_weak();
-    let packages_for_repair = Rc::clone(&packages);
-    let voice_for_repair = Rc::clone(&voice);
-    let repair_platform = platform.clone();
-    main.on_repair_transcription_package(move || {
-        let Some(main) = main_weak.upgrade() else {
-            return;
-        };
-        if voice_for_repair.is_busy() {
-            main.set_transcription_package_status(SharedString::from("请先结束当前语音输入"));
-            return;
-        }
-        main.set_transcription_package_busy(true);
-        main.set_transcription_package_status(SharedString::from(
-            "正在建立并自检新的包 generation",
-        ));
-        if let Err(error) = packages_for_repair.start(repair_platform.clone(), true) {
-            main.set_transcription_package_busy(false);
-            main.set_transcription_package_status(SharedString::from(error.to_string()));
-        }
-    });
-
-    let main_weak = main.as_weak();
-    let packages_for_cancel = Rc::clone(&packages);
-    main.on_cancel_transcription_package(move || {
-        packages_for_cancel.cancel();
-        if let Some(main) = main_weak.upgrade() {
-            main.set_transcription_package_status(SharedString::from("正在取消本地包操作"));
-        }
-    });
-
-    let main_weak = main.as_weak();
-    let packages_for_remove = Rc::clone(&packages);
-    let voice_for_remove = Rc::clone(&voice);
-    main.on_remove_transcription_package(move || {
-        let Some(main) = main_weak.upgrade() else {
-            return;
-        };
-        if voice_for_remove.is_busy() {
-            main.set_transcription_package_status(SharedString::from("请先结束当前语音输入"));
-            return;
-        }
-        main.set_transcription_package_busy(true);
-        main.set_transcription_package_status(SharedString::from("正在删除当前本地转写包"));
-        if let Err(error) = packages_for_remove.remove() {
-            main.set_transcription_package_busy(false);
-            main.set_transcription_package_status(SharedString::from(error.to_string()));
-        }
-    });
-
-    let main_weak = main.as_weak();
-    let capture_weak = capture.as_weak();
-    let app_for_main_voice = Rc::clone(&application);
-    let packages_for_main_voice = Rc::clone(&packages);
-    let voice_for_main = Rc::clone(&voice);
-    let preview_for_main_voice = Rc::clone(&preview);
-    main.on_toggle_transcription(move |_note_id, byte_offset| {
-        let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) else {
-            return;
-        };
-        if packages_for_main_voice.is_busy() {
-            set_voice_status(&main, &capture, "本地包操作期间不能开始录音");
-            return;
-        }
-        if preview_for_main_voice.borrow().is_some() {
-            set_voice_status(&main, &capture, "请先插入或放弃当前转写预览");
-            return;
-        }
-        start_or_stop_voice(
-            &main,
-            &capture,
-            &app_for_main_voice,
-            &voice_for_main,
-            byte_offset,
-        );
-    });
-
-    let main_weak = main.as_weak();
-    let capture_weak = capture.as_weak();
-    let app_for_capture_voice = Rc::clone(&application);
-    let packages_for_capture_voice = Rc::clone(&packages);
-    let voice_for_capture = Rc::clone(&voice);
-    let preview_for_capture_voice = Rc::clone(&preview);
-    capture.on_toggle_transcription(move |_note_id, byte_offset| {
-        let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) else {
-            return;
-        };
-        if packages_for_capture_voice.is_busy() {
-            set_voice_status(&main, &capture, "本地包操作期间不能开始录音");
-            return;
-        }
-        if preview_for_capture_voice.borrow().is_some() {
-            set_voice_status(&main, &capture, "请先插入或放弃当前转写预览");
-            return;
-        }
-        start_or_stop_voice(
-            &main,
-            &capture,
-            &app_for_capture_voice,
-            &voice_for_capture,
-            byte_offset,
-        );
-    });
-
-    let voice_for_main_cancel = Rc::clone(&voice);
-    main.on_cancel_transcription(move || voice_for_main_cancel.cancel());
-    let voice_for_capture_cancel = Rc::clone(&voice);
-    capture.on_cancel_transcription(move || voice_for_capture_cancel.cancel());
-
-    let main_weak = main.as_weak();
-    let capture_weak = capture.as_weak();
-    let app_for_main_insert = Rc::clone(&application);
-    let preview_for_main_insert = Rc::clone(&preview);
-    main.on_insert_transcription_preview(move |text| {
-        let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) else {
-            return;
-        };
-        insert_transcription_preview(
-            &main,
-            &capture,
-            &app_for_main_insert,
-            &preview_for_main_insert,
-            text.as_str(),
-        );
-    });
-
-    let main_weak = main.as_weak();
-    let capture_weak = capture.as_weak();
-    let app_for_capture_insert = Rc::clone(&application);
-    let preview_for_capture_insert = Rc::clone(&preview);
-    capture.on_insert_transcription_preview(move |text| {
-        let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) else {
-            return;
-        };
-        insert_transcription_preview(
-            &main,
-            &capture,
-            &app_for_capture_insert,
-            &preview_for_capture_insert,
-            text.as_str(),
-        );
-    });
-
-    let main_weak = main.as_weak();
-    let capture_weak = capture.as_weak();
-    let preview_for_main_discard = Rc::clone(&preview);
-    main.on_discard_transcription_preview(move || {
-        if let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) {
-            discard_transcription_preview(&main, &capture, &preview_for_main_discard);
-        }
-    });
-    let main_weak = main.as_weak();
-    let capture_weak = capture.as_weak();
-    capture.on_discard_transcription_preview(move || {
-        if let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) {
-            discard_transcription_preview(&main, &capture, &preview);
-        }
-    });
-}
-
-#[cfg(windows)]
-fn start_or_stop_voice(
-    main: &MainWindow,
-    capture: &QuickCaptureWindow,
-    application: &Application,
-    voice: &VoiceController,
-    byte_offset: i32,
-) {
-    let result = application.editing_snapshot().and_then(|snapshot| {
-        voice
-            .toggle(TranscriptionTarget {
-                note_id: snapshot.note_id,
-                byte_offset: byte_offset.max(0) as usize,
-            })
-            .map_err(|error| quicknote_app::ApplicationError::InvalidCommand {
-                message: error.to_string(),
-            })
-    });
-    match result {
-        Ok(()) => {
-            main.set_transcription_busy(true);
-            capture.set_transcription_busy(true);
-        }
-        Err(error) => set_voice_status(main, capture, &format!("语音输入失败：{error}")),
-    }
-}
-
-#[cfg(windows)]
-fn insert_transcription_preview(
-    main: &MainWindow,
-    capture: &QuickCaptureWindow,
-    application: &Application,
-    preview: &RefCell<Option<TranscriptionPreview>>,
-    edited_text: &str,
-) {
-    let Some(frozen) = preview.borrow().clone() else {
-        set_voice_status(main, capture, "没有等待插入的转写预览");
-        return;
-    };
-    let result = application.editing_snapshot().and_then(|snapshot| {
-        if snapshot.note_id != frozen.target.note_id {
-            return Err(quicknote_app::ApplicationError::InvalidCommand {
-                message: "冻结便签已切换；预览会保留，请返回原便签后重试".to_owned(),
-            });
-        }
-        let body = insert_at_frozen_offset(&snapshot.body, frozen.target.byte_offset, edited_text);
-        application.edit(EditorIntent::ReplaceBody(body))
-    });
-    match result {
-        Ok(snapshot) => {
-            *preview.borrow_mut() = None;
-            main.set_transcription_preview_visible(false);
-            capture.set_transcription_preview_visible(false);
-            set_editor_document(main, capture, &snapshot);
-            set_voice_status(main, capture, "已插入录音结束时确定的冻结插入目标");
-        }
-        Err(error) => set_voice_status(main, capture, &format!("插入失败：{error}")),
-    }
-}
-
-#[cfg(windows)]
-fn discard_transcription_preview(
-    main: &MainWindow,
-    capture: &QuickCaptureWindow,
-    preview: &RefCell<Option<TranscriptionPreview>>,
-) {
-    *preview.borrow_mut() = None;
-    main.set_transcription_preview_visible(false);
-    capture.set_transcription_preview_visible(false);
-    set_voice_status(main, capture, "已放弃本次转写预览");
-}
-
-#[cfg(windows)]
-fn sync_transcription_events(
-    main: &MainWindow,
-    capture: &QuickCaptureWindow,
-    packages: &PackageController,
-    voice: &VoiceController,
-    preview: &RefCell<Option<TranscriptionPreview>>,
-) {
-    for event in packages.drain_events() {
-        match event {
-            PackageEvent::Progress(progress) => {
-                main.set_transcription_package_busy(true);
-                capture.set_transcription_package_busy(true);
-                main.set_transcription_package_status(SharedString::from(progress.message));
-                main.set_transcription_package_detail(SharedString::from(
-                    if progress.total_bytes > 0 {
-                        format!(
-                            "{:.1} / {:.1} MiB",
-                            mib(progress.completed_bytes),
-                            mib(progress.total_bytes)
-                        )
-                    } else {
-                        "正在执行本地步骤".to_owned()
-                    },
-                ));
-            }
-            PackageEvent::Status(status) => sync_package_status(main, capture, status),
-            PackageEvent::Failed(error) => {
-                main.set_transcription_package_busy(false);
-                capture.set_transcription_package_busy(false);
-                main.set_transcription_package_status(SharedString::from(error.to_string()));
-            }
-        }
-    }
-
-    for event in voice.drain_events() {
-        match event {
-            VoiceEvent::State { state, message } => {
-                let busy = matches!(
-                    state,
-                    TranscriptionState::Preparing
-                        | TranscriptionState::Ready
-                        | TranscriptionState::Recording
-                        | TranscriptionState::Transcribing
-                );
-                let recording = state == TranscriptionState::Recording;
-                main.set_transcription_busy(busy);
-                capture.set_transcription_busy(busy);
-                main.set_transcription_recording(recording);
-                capture.set_transcription_recording(recording);
-                set_voice_status(main, capture, &message);
-            }
-            VoiceEvent::Preview(value) => {
-                main.set_transcription_preview_text(SharedString::from(value.text.clone()));
-                capture.set_transcription_preview_text(SharedString::from(value.text.clone()));
-                main.set_transcription_risk(SharedString::from(value.risk_notice.clone()));
-                capture.set_transcription_risk(SharedString::from(value.risk_notice.clone()));
-                main.set_transcription_preview_visible(true);
-                capture.set_transcription_preview_visible(true);
-                *preview.borrow_mut() = Some(value);
-            }
-            VoiceEvent::Failed(error) => {
-                main.set_transcription_busy(false);
-                capture.set_transcription_busy(false);
-                main.set_transcription_recording(false);
-                capture.set_transcription_recording(false);
-                set_voice_status(main, capture, &format!("语音输入未完成：{error}"));
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-fn sync_package_status(main: &MainWindow, capture: &QuickCaptureWindow, status: PackageStatus) {
-    main.set_transcription_package_busy(false);
-    capture.set_transcription_package_busy(false);
-    match status {
-        PackageStatus::Missing => {
-            main.set_transcription_package_ready(false);
-            main.set_transcription_package_corrupt(false);
-            capture.set_transcription_package_ready(false);
-            main.set_transcription_package_status(SharedString::from("本地转写包未安装"));
-            main.set_transcription_package_detail(SharedString::from(
-                "需用户确认后单独下载约 177 MiB；安装器和应用不会静默下载",
-            ));
-        }
-        PackageStatus::Corrupt { reason } => {
-            main.set_transcription_package_ready(false);
-            main.set_transcription_package_corrupt(true);
-            capture.set_transcription_package_ready(false);
-            main.set_transcription_package_status(SharedString::from("本地转写包损坏，需要修复"));
-            main.set_transcription_package_detail(SharedString::from(reason));
-        }
-        PackageStatus::Ready {
-            package_id,
-            installed_bytes,
-        } => {
-            main.set_transcription_package_ready(true);
-            main.set_transcription_package_corrupt(false);
-            capture.set_transcription_package_ready(true);
-            main.set_transcription_package_status(SharedString::from("本地转写包可用"));
-            main.set_transcription_package_detail(SharedString::from(format!(
-                "{}，完整 inventory 已校验，磁盘 {:.1} MiB",
-                package_id,
-                mib(installed_bytes)
-            )));
-        }
-    }
-}
-
-#[cfg(windows)]
-fn set_voice_status(main: &MainWindow, capture: &QuickCaptureWindow, message: &str) {
-    let message = SharedString::from(message);
-    main.set_transcription_status(message.clone());
-    capture.set_transcription_status(message);
-}
-
-#[cfg(windows)]
-fn mib(bytes: u64) -> f64 {
-    bytes as f64 / (1024.0 * 1024.0)
 }
 
 #[cfg(windows)]

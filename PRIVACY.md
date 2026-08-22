@@ -4,18 +4,13 @@ QuickNote is a local-first Windows application. This policy describes the MVP be
 
 ## Local data
 
-- Notes, reminders, settings, backups and downloaded transcription assets are stored under `%LOCALAPPDATA%\QuickNote`.
-- Microphone audio is processed on the user's device. QuickNote does not upload recorded audio or transcription text.
+- Notes, reminders, settings and backups are stored under `%LOCALAPPDATA%\QuickNote`.
 - QuickNote does not include telemetry, advertising, analytics or automatic crash reporting.
 - Exported files are written only to a location explicitly selected by the user.
 
 ## Network access
 
-QuickNote does not transfer information to another networked system unless the user explicitly requests an operation that requires network access.
-
-When the user chooses to install the optional local transcription package, QuickNote downloads pinned sherpa-onnx runtime and SenseVoice model archives from the URLs recorded in `crates/quicknote-app/assets/transcription-package.json`. The download host can receive ordinary connection metadata such as the user's IP address and user agent under that host's privacy policy. Note contents and recorded audio are not included in these requests.
-
-GitHub's privacy statement applies when the current package URLs resolve to GitHub Releases: <https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement>.
+QuickNote v0.1.0 does not transfer application data to another networked system. It contains no telemetry, update checker, model downloader or audio network path.
 
 ## Uninstallation
 

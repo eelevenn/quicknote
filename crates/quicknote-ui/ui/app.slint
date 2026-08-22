@@ -127,17 +127,6 @@ export component MainWindow inherits Window {
     in property <string> timing-status;
     in property <bool> reminder-missed: false;
     in property <bool> reminder-sync-pending: false;
-    in property <string> transcription-status: "本地语音输入待命";
-    in property <bool> transcription-busy: false;
-    in property <bool> transcription-recording: false;
-    in-out property <bool> transcription-preview-visible: false;
-    in-out property <string> transcription-preview-text;
-    in property <string> transcription-risk;
-    in property <string> transcription-package-status: "本地转写包未安装";
-    in property <string> transcription-package-detail;
-    in property <bool> transcription-package-ready: false;
-    in property <bool> transcription-package-corrupt: false;
-    in property <bool> transcription-package-busy: false;
     in-out property <int> confirm-action: 0;
     in-out property <string> confirm-note-id;
     in-out property <string> confirm-note-title;
@@ -167,15 +156,6 @@ export component MainWindow inherits Window {
     callback clear-reminder();
     callback export-json();
     callback export-markdown(string);
-    callback open-transcription-packages();
-    callback install-transcription-package();
-    callback repair-transcription-package();
-    callback cancel-transcription-package();
-    callback remove-transcription-package();
-    callback toggle-transcription(string, int);
-    callback cancel-transcription();
-    callback insert-transcription-preview(string);
-    callback discard-transcription-preview();
     callback open-quick-capture();
     callback exit-requested();
 
@@ -293,16 +273,6 @@ export component MainWindow inherits Window {
                         }
                         Rectangle { horizontal-stretch: 1; }
                         Button {
-                            enabled: root.transcription-package-ready && !root.transcription-package-busy && (!root.transcription-busy || root.transcription-recording);
-                            text: root.transcription-recording ? "停止录音" : "语音输入";
-                            clicked => { root.toggle-transcription(root.editor-note-id, main-editor.cursor-byte-offset); }
-                        }
-                        Button {
-                            visible: root.transcription-busy;
-                            text: "取消语音";
-                            clicked => { root.cancel-transcription(); }
-                        }
-                        Button {
                             text: root.preview-mode ? "编辑" : "预览";
                             clicked => { root.preview-mode = !root.preview-mode; }
                         }
@@ -360,29 +330,6 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
-                    if root.transcription-preview-visible : Rectangle {
-                        preferred-height: 145px;
-                        background: Palette.alternate-background;
-                        border-color: #9a6700;
-                        border-width: 1px;
-                        border-radius: 6px;
-                        VerticalBox {
-                            padding: 8px;
-                            spacing: 5px;
-                            Text { text: "转写预览"; font-weight: 650; color: Palette.foreground; }
-                            TrackedTextEdit {
-                                text <=> root.transcription-preview-text;
-                                placeholder-text: "没有可插入文字";
-                                accessible-label: "可编辑转写预览";
-                            }
-                            Text { text: root.transcription-risk; wrap: word-wrap; color: #9a6700; }
-                            HorizontalBox {
-                                Rectangle { horizontal-stretch: 1; }
-                                Button { text: "插入到冻结目标"; clicked => { root.insert-transcription-preview(root.transcription-preview-text); } }
-                                Button { text: "放弃"; clicked => { root.discard-transcription-preview(); } }
-                            }
-                        }
-                    }
                     if root.preview-mode : ScrollView {
                         VerticalBox {
                             spacing: 8px;
@@ -411,12 +358,6 @@ export component MainWindow inherits Window {
                             text: "重试保存";
                             clicked => { root.retry-save(); }
                         }
-                    }
-                    Text {
-                        text: root.transcription-status;
-                        wrap: word-wrap;
-                        color: root.transcription-status == "本地语音输入待命" ? Palette.alternate-foreground : Palette.foreground;
-                        accessible-label: root.transcription-status;
                     }
                 }
             }
@@ -491,35 +432,6 @@ export component MainWindow inherits Window {
                     Button { text: "15"; clicked => { root.snooze-changed(15); } }
                     Button { text: "30"; clicked => { root.snooze-changed(30); } }
                     Button { text: "60"; clicked => { root.snooze-changed(60); } }
-                }
-                VerticalBox {
-                    spacing: 6px;
-                    Text { text: "本地转写包"; font-weight: 650; color: Palette.foreground; }
-                    Text { text: root.transcription-package-status; wrap: word-wrap; color: Palette.foreground; }
-                    Text { text: root.transcription-package-detail; wrap: word-wrap; color: Palette.alternate-foreground; }
-                    HorizontalBox {
-                        Button {
-                            visible: !root.transcription-package-ready && !root.transcription-package-corrupt && !root.transcription-package-busy;
-                            text: "确认并下载约 177 MiB";
-                            clicked => { root.install-transcription-package(); }
-                        }
-                        Button {
-                            visible: (root.transcription-package-ready || root.transcription-package-corrupt) && !root.transcription-package-busy;
-                            text: "校验并修复";
-                            clicked => { root.repair-transcription-package(); }
-                        }
-                        Button {
-                            visible: root.transcription-package-busy;
-                            text: "取消下载/修复";
-                            clicked => { root.cancel-transcription-package(); }
-                        }
-                        Button {
-                            visible: (root.transcription-package-ready || root.transcription-package-corrupt) && !root.transcription-package-busy;
-                            text: "删除本地包";
-                            clicked => { root.remove-transcription-package(); }
-                        }
-                        Button { text: "查看固定清单"; clicked => { root.open-transcription-packages(); } }
-                    }
                 }
                 HorizontalBox {
                     Button { text: "导出完整 JSON"; clicked => { root.export-json(); } }
@@ -628,23 +540,11 @@ export component QuickCaptureWindow inherits Window {
     in property <bool> save-failed: false;
     in property <string> reminder-status;
     in property <bool> reminder-missed: false;
-    in property <string> transcription-status: "本地语音输入待命";
-    in property <bool> transcription-busy: false;
-    in property <bool> transcription-recording: false;
-    in property <bool> transcription-package-ready: false;
-    in property <bool> transcription-package-busy: false;
-    in-out property <bool> transcription-preview-visible: false;
-    in-out property <string> transcription-preview-text;
-    in property <string> transcription-risk;
 
     callback body-edited(string);
     callback retry-save();
     callback dismissed();
     callback open-main();
-    callback toggle-transcription(string, int);
-    callback cancel-transcription();
-    callback insert-transcription-preview(string);
-    callback discard-transcription-preview();
 
     VerticalBox {
         padding: 20px;
@@ -666,26 +566,6 @@ export component QuickCaptureWindow inherits Window {
             edited(text) => { root.body-edited(text); }
             changed cursor-byte-offset => { root.editor-cursor-byte-offset = self.cursor-byte-offset; }
         }
-        if root.transcription-preview-visible : Rectangle {
-            preferred-height: 112px;
-            background: Palette.alternate-background;
-            border-color: #9a6700;
-            border-width: 1px;
-            VerticalBox {
-                padding: 6px;
-                TrackedTextEdit {
-                    text <=> root.transcription-preview-text;
-                    placeholder-text: "检查转写后再插入";
-                    accessible-label: "快速记录转写预览";
-                }
-                Text { text: root.transcription-risk; wrap: word-wrap; color: #9a6700; }
-                HorizontalBox {
-                    Rectangle { horizontal-stretch: 1; }
-                    Button { text: "插入"; clicked => { root.insert-transcription-preview(root.transcription-preview-text); } }
-                    Button { text: "放弃"; clicked => { root.discard-transcription-preview(); } }
-                }
-            }
-        }
         Text {
             visible: root.reminder-status != "";
             text: root.reminder-status;
@@ -695,17 +575,10 @@ export component QuickCaptureWindow inherits Window {
         HorizontalBox {
             Text { text: root.save-status; color: root.save-failed ? #c42b1c : Palette.foreground; accessible-label: root.save-status; }
             Rectangle { horizontal-stretch: 1; }
-            Button {
-                enabled: root.transcription-package-ready && !root.transcription-package-busy && (!root.transcription-busy || root.transcription-recording);
-                text: root.transcription-recording ? "停止录音" : "语音输入";
-                clicked => { root.toggle-transcription(root.editor-note-id, capture-editor.cursor-byte-offset); }
-            }
-            Button { visible: root.transcription-busy; text: "取消语音"; clicked => { root.cancel-transcription(); } }
             Button { visible: root.save-failed; text: "重试"; clicked => { root.retry-save(); } }
             Button { text: "主页"; clicked => { root.open-main(); } }
             Button { text: "关闭"; clicked => { root.dismissed(); } }
         }
-        Text { text: root.transcription-status; wrap: word-wrap; color: Palette.alternate-foreground; accessible-label: root.transcription-status; }
     }
 
     public function focus-editor-at(offset: int) {

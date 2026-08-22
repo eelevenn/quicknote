@@ -49,9 +49,8 @@ if ($Version -ne $Matches.version) {
 
 & (Join-Path $PSScriptRoot 'build-windows.ps1')
 $executable = Join-Path $repositoryRoot 'target\x86_64-pc-windows-msvc\release\quicknote-windows.exe'
-$sidecar = Join-Path $repositoryRoot 'target\x86_64-pc-windows-msvc\release\quicknote-sensevoice-sidecar.exe'
 & (Join-Path $PSScriptRoot 'Test-WindowsRuntimeDependencies.ps1') `
-    -Path @($executable, $sidecar) `
+    -Path $executable `
     -OutputDirectory $OutputDirectory
 
 & (Join-Path $PSScriptRoot 'Build-QuickNoteInstaller.ps1') `
@@ -105,7 +104,6 @@ $manifest = [ordered]@{
         signature_status = $installerSignatureStatus
     }
     application_signature_status = $applicationSignatureStatus
-    transcription_sidecar_distribution = 'separate optional package; excluded from this preview MSI'
 }
 $manifestPath = Join-Path $OutputDirectory "QuickNote-$Version-x64.unsigned-preview.json"
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding utf8

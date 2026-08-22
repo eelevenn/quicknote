@@ -44,11 +44,8 @@ jobs:
       - name: Reject dynamic VC Runtime dependencies
         shell: pwsh
         run: |
-          $binaries = @(
-            '.\target\x86_64-pc-windows-msvc\release\quicknote-windows.exe'
-            '.\target\x86_64-pc-windows-msvc\release\quicknote-sensevoice-sidecar.exe'
-          )
-          .\scripts\Test-WindowsRuntimeDependencies.ps1 -Path $binaries
+          .\scripts\Test-WindowsRuntimeDependencies.ps1 `
+            -Path '.\target\x86_64-pc-windows-msvc\release\quicknote-windows.exe'
       - name: Build and inspect unsigned MSI
         shell: pwsh
         run: |
