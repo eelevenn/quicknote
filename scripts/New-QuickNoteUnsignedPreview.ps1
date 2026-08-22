@@ -17,14 +17,16 @@ if (-not $OutputDirectory) {
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 
 # SignPath 必须能把二进制追溯到公开提交；脏工作树产物不得进入预览 Release。
-$status = & git -C $repositoryRoot status --porcelain
+# Windows 无法表达 WSL Bash 文件的可执行位，因此这里只忽略 file mode 与换行转换。
+$gitCompatibility = @('-c', 'core.filemode=false', '-c', 'core.autocrlf=false')
+$status = & git @gitCompatibility -C $repositoryRoot status --porcelain
 if ($LASTEXITCODE -ne 0) {
     throw '无法读取 Git 工作树状态。'
 }
 if ($status) {
     throw '未签名预览只能从完全干净的 Git 工作树构建。'
 }
-$commit = (& git -C $repositoryRoot rev-parse HEAD).Trim()
+$commit = (& git @gitCompatibility -C $repositoryRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') {
     throw '无法确定预览产物对应的 Git 提交。'
 }
