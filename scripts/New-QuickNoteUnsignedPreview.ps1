@@ -17,14 +17,19 @@ if (-not $OutputDirectory) {
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 
 # SignPath 必须能把二进制追溯到公开提交；脏工作树产物不得进入预览 Release。
-# Windows 无法表达 WSL Bash 文件的可执行位，因此这里只忽略 file mode 与换行转换。
+# GitHub Windows runner 会按平台转换换行，因此只忽略行尾差异与 WSL 文件模式差异。
 $gitCompatibility = @('-c', 'core.filemode=false', '-c', 'core.autocrlf=false')
-$status = & git @gitCompatibility -C $repositoryRoot status --porcelain
+$trackedChanges = & git @gitCompatibility -C $repositoryRoot diff --name-only --ignore-space-at-eol
+$stagedChanges = & git @gitCompatibility -C $repositoryRoot diff --cached --name-only --ignore-space-at-eol
+$untrackedChanges = & git @gitCompatibility -C $repositoryRoot ls-files --others --exclude-standard
 if ($LASTEXITCODE -ne 0) {
     throw '无法读取 Git 工作树状态。'
 }
-if ($status) {
-    throw '未签名预览只能从完全干净的 Git 工作树构建。'
+$dirtyEntries = @($trackedChanges) + @($stagedChanges) + @($untrackedChanges) |
+    Where-Object { $_ } |
+    Sort-Object -Unique
+if ($dirtyEntries.Count -gt 0) {
+    throw "未签名预览只能从干净的 Git 工作树构建：$($dirtyEntries -join ', ')"
 }
 $commit = (& git @gitCompatibility -C $repositoryRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') {
