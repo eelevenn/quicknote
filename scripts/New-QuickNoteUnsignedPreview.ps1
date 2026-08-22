@@ -58,11 +58,28 @@ $installer = Join-Path $OutputDirectory "QuickNote-$Version-x64.msi"
     -OutputDirectory $OutputDirectory `
     -AllowUnsigned
 
-# 这个特殊预览必须保持未签名，避免把测试身份误报为正式发布者。
-$installerSignature = Get-AuthenticodeSignature -LiteralPath $installer
-$applicationSignature = Get-AuthenticodeSignature -LiteralPath $executable
-if ($installerSignature.Status -ne 'NotSigned' -or $applicationSignature.Status -ne 'NotSigned') {
-    throw 'SignPath 申请预览必须是明确未签名的 MSI 与应用。'
+# Authenticode 对 UNC 上的 MSI 会返回 UnknownError，因此在本地临时目录验证副本。
+$temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+$signatureStage = Join-Path $temporaryRoot ('quicknote-preview-signature-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $signatureStage | Out-Null
+try {
+    $localInstaller = Join-Path $signatureStage (Split-Path -Leaf $installer)
+    $localExecutable = Join-Path $signatureStage (Split-Path -Leaf $executable)
+    Copy-Item -LiteralPath $installer -Destination $localInstaller
+    Copy-Item -LiteralPath $executable -Destination $localExecutable
+    Unblock-File -LiteralPath $localInstaller, $localExecutable
+    $installerSignatureStatus = (Get-AuthenticodeSignature -LiteralPath $localInstaller).Status.ToString()
+    $applicationSignatureStatus = (Get-AuthenticodeSignature -LiteralPath $localExecutable).Status.ToString()
+    if ($installerSignatureStatus -ne 'NotSigned' -or $applicationSignatureStatus -ne 'NotSigned') {
+        throw 'SignPath 申请预览必须是明确未签名的 MSI 与应用。'
+    }
+}
+finally {
+    # 只删除本脚本在系统临时目录下创建的随机签名验证目录。
+    $resolvedSignatureStage = [IO.Path]::GetFullPath($signatureStage)
+    if ($resolvedSignatureStage.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        Remove-Item -LiteralPath $resolvedSignatureStage -Recurse -Force
+    }
 }
 
 $installerItem = Get-Item -LiteralPath $installer
@@ -78,9 +95,9 @@ $manifest = [ordered]@{
         file = $installerItem.Name
         bytes = $installerItem.Length
         sha256 = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-        signature_status = $installerSignature.Status.ToString()
+        signature_status = $installerSignatureStatus
     }
-    application_signature_status = $applicationSignature.Status.ToString()
+    application_signature_status = $applicationSignatureStatus
     transcription_sidecar_distribution = 'separate optional package; excluded from this preview MSI'
 }
 $manifestPath = Join-Path $OutputDirectory "QuickNote-$Version-x64.unsigned-preview.json"
