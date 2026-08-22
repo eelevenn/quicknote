@@ -41,5 +41,19 @@ jobs:
       - name: Build production shell
         shell: pwsh
         run: .\scripts\build-windows.ps1
+      - name: Reject dynamic VC Runtime dependencies
+        shell: pwsh
+        run: |
+          $binaries = @(
+            '.\target\x86_64-pc-windows-msvc\release\quicknote-windows.exe'
+            '.\target\x86_64-pc-windows-msvc\release\quicknote-sensevoice-sidecar.exe'
+          )
+          .\scripts\Test-WindowsRuntimeDependencies.ps1 -Path $binaries
+      - name: Build and inspect unsigned MSI
+        shell: pwsh
+        run: |
+          .\scripts\Build-QuickNoteInstaller.ps1 -SkipApplicationBuild
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"$').Matches[0].Groups['version'].Value
+          .\scripts\Test-QuickNoteInstaller.ps1 -InstallerPath ".\artifacts\release-candidate\QuickNote-$version-x64.msi" -AllowUnsigned
       - name: Test complete workspace
         run: cargo test --locked --workspace

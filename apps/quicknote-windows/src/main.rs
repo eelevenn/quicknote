@@ -56,6 +56,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Duration;
     use windows_platform::WindowsPlatformServices;
 
+    // MSI 最终卸载只清理当前用户集成，不打开数据库或创建窗口。
+    if std::env::args().any(|argument| argument == "--unregister-user-integration") {
+        WindowsPlatformServices::unregister_user_integration()?;
+        return Ok(());
+    }
+
     // WinRT 计划通知与 Slint 共享 UI 线程的 STA apartment。
     let _apartment = windows_platform::initialize_winrt_apartment()?;
     let platform = WindowsPlatformServices::new();
@@ -80,6 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ))?);
     let main_window = MainWindow::new()?;
     let quick_capture = QuickCaptureWindow::new()?;
+    main_window.set_application_version(SharedString::from(env!("CARGO_PKG_VERSION")));
     let package_controller = Rc::new(PackageController::new(&data_directory)?);
     let voice_controller = Rc::new(VoiceController::new(&data_directory)?);
     let transcription_preview = Rc::new(RefCell::new(None::<TranscriptionPreview>));
@@ -254,15 +261,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(windows)]
 fn activation_from_arguments() -> ActivationRequest {
-    let mut arguments = std::env::args().skip(1);
     let protocol_prefix = format!("{}:", PRODUCT_IDENTITY.protocol);
-    if let Some(argument) = arguments
-        .find(|argument| argument == "--quick-capture" || argument.starts_with(&protocol_prefix))
-    {
-        if argument == "--quick-capture" {
-            return ActivationRequest::ShowQuickCapture;
+    for argument in std::env::args().skip(1) {
+        match argument.as_str() {
+            "--startup" => return ActivationRequest::BackgroundStartup,
+            "--quick-capture" => return ActivationRequest::ShowQuickCapture,
+            _ if argument.starts_with(&protocol_prefix) => {
+                return activation_from_protocol_uri(&argument);
+            }
+            _ => {}
         }
-        return activation_from_protocol_uri(&argument);
     }
     ActivationRequest::ShowMain
 }
@@ -1349,6 +1357,11 @@ fn route_activation(
     activation: ActivationRequest,
 ) {
     match activation {
+        ActivationRequest::BackgroundStartup => {
+            // 登录启动只保持全局快捷键和提醒协调器运行。
+            let _ = main.hide();
+            let _ = capture.hide();
+        }
         ActivationRequest::GlobalShortcutPressed => {
             route_global_shortcut(main, capture, application, platform);
         }

@@ -1,3 +1,7 @@
 [alias]
 # 统一 Windows 11 x64 的生产构建入口。
 windows-release = "build --locked --release --package quicknote-windows --target x86_64-pc-windows-msvc"
+
+[target.x86_64-pc-windows-msvc]
+# 静态链接 MSVC CRT，确保标准用户安装不依赖目标机预装 VC Redist。
+rustflags = ["-C", "target-feature=+crt-static"]

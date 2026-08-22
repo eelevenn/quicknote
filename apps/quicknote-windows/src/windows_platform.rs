@@ -104,6 +104,105 @@ impl WindowsPlatformServices {
         }
     }
 
+    /// 最终卸载时清理当前用户集成；数据库与导出文件始终保留。
+    pub fn unregister_user_integration() -> Result<(), PlatformError> {
+        // 必须在删除 AUMID 注册前移除计划项和历史，避免卸载后仍可触发 QuickNote。
+        let _apartment = initialize_winrt_apartment()?;
+        Self::clear_all_notifications()?;
+        let current_user = RegKey::predef(HKEY_CURRENT_USER);
+
+        // 自启动值由应用按用户设置写入，MSI 不拥有它，必须单独清理。
+        if let Ok(run_key) = current_user.open_subkey_with_flags(
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            KEY_SET_VALUE,
+        ) {
+            match run_key.delete_value(PRODUCT_IDENTITY.product_name) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(PlatformError::new(
+                        "remove_startup_registration",
+                        error.to_string(),
+                    ));
+                }
+            }
+        }
+
+        // 这些键通常由 MSI 删除；这里也覆盖应用自修复过的注册。
+        for key in [
+            format!(r"Software\Classes\{}", PRODUCT_IDENTITY.protocol),
+            format!(
+                r"Software\Classes\AppUserModelId\{}",
+                PRODUCT_IDENTITY.aumid
+            ),
+            format!(r"Software\Classes\CLSID\{TOAST_ACTIVATOR_CLSID}"),
+        ] {
+            match current_user.delete_subkey_all(&key) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(PlatformError::new(
+                        "remove_windows_registration",
+                        error.to_string(),
+                    ));
+                }
+            }
+        }
+
+        let shortcut = Self::notification_shortcut_path()?;
+        match fs::remove_file(shortcut) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(PlatformError::new(
+                "remove_notification_shortcut",
+                error.to_string(),
+            )),
+        }
+    }
+
+    fn clear_all_notifications() -> Result<(), PlatformError> {
+        let notifier = Self::notification_notifier()?;
+        let scheduled = notifier.GetScheduledToastNotifications().map_err(|error| {
+            PlatformError::new(
+                "list_scheduled_notifications_for_uninstall",
+                error.to_string(),
+            )
+        })?;
+        let size = scheduled.Size().map_err(|error| {
+            PlatformError::new(
+                "list_scheduled_notifications_for_uninstall",
+                error.to_string(),
+            )
+        })?;
+        // 先复制句柄再删除，避免在遍历只读视图时改变集合。
+        let mut items = Vec::with_capacity(size as usize);
+        for index in 0..size {
+            items.push(scheduled.GetAt(index).map_err(|error| {
+                PlatformError::new(
+                    "read_scheduled_notification_for_uninstall",
+                    error.to_string(),
+                )
+            })?);
+        }
+        for item in items {
+            notifier.RemoveFromSchedule(&item).map_err(|error| {
+                PlatformError::new(
+                    "remove_scheduled_notification_for_uninstall",
+                    error.to_string(),
+                )
+            })?;
+        }
+
+        ToastNotificationManager::History()
+            .and_then(|history| history.ClearWithId(&HSTRING::from(PRODUCT_IDENTITY.aumid)))
+            .map_err(|error| {
+                PlatformError::new(
+                    "clear_notification_history_for_uninstall",
+                    error.to_string(),
+                )
+            })
+    }
+
     /// 在创建窗口前设置通知与任务栏共同使用的稳定 AUMID。
     pub fn configure_process_identity(&self) -> Result<(), PlatformError> {
         let aumid = HSTRING::from(PRODUCT_IDENTITY.aumid);
