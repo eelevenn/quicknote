@@ -2523,6 +2523,9 @@ fn search_notes(
     if query.is_empty() {
         return Ok(Vec::new());
     }
+    if query.chars().count() >= 3 {
+        return search_indexed_notes(connection, query);
+    }
     if query.is_ascii() {
         return search_ascii_notes(connection, query);
     }
@@ -2566,24 +2569,75 @@ fn search_notes(
     Ok(results)
 }
 
+fn search_indexed_notes(
+    connection: &Connection,
+    query: &str,
+) -> Result<Vec<SearchResult>, ApplicationError> {
+    let folded_query = query.to_lowercase();
+    let mut statement = connection
+        .prepare(
+            "SELECT notes.id, notes.derived_title, notes.body, notes.lifecycle
+             FROM note_search
+             JOIN notes ON notes.rowid = note_search.rowid
+             WHERE note_search MATCH ?1
+               AND notes.lifecycle IN ('active', 'archived')
+             ORDER BY notes.updated_at_ms DESC, notes.id",
+        )
+        .map_err(|error| ApplicationError::storage("prepare_indexed_note_search", error))?;
+    let rows = statement
+        .query_map(params![fts5_literal_query(query)], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| ApplicationError::storage("search_indexed_notes", error))?;
+    let mut results = Vec::new();
+    for row in rows {
+        let (id, title, body, lifecycle) =
+            row.map_err(|error| ApplicationError::storage("decode_indexed_search_result", error))?;
+        // FTS 只负责缩小候选集；最终比较沿用完整 Unicode 小写文字子串合同。
+        let title_matches = title.to_lowercase().contains(&folded_query);
+        let body_matches = body.to_lowercase().contains(&folded_query);
+        if title_matches || body_matches {
+            results.push(SearchResult {
+                id: decode_uuid(id, "decode_indexed_search_note_id")?,
+                title,
+                lifecycle: decode_lifecycle(&lifecycle)?,
+                matched_in_body: body_matches,
+                exceeds_performance_guarantee: body.len() > PERFORMANCE_GUARANTEE_BODY_BYTES,
+            });
+        }
+    }
+    Ok(results)
+}
+
+fn fts5_literal_query(query: &str) -> String {
+    // 双引号短语关闭 MATCH 运算符语义；内部引号按 FTS5 规则成对转义。
+    format!("\"{}\"", query.replace('"', "\"\""))
+}
+
 fn search_ascii_notes(
     connection: &Connection,
     query: &str,
 ) -> Result<Vec<SearchResult>, ApplicationError> {
+    let pattern = ascii_like_pattern(query);
     let mut statement = connection
         .prepare(
             "SELECT id, derived_title, lifecycle,
-                    instr(lower(body), lower(?1)) > 0 AS body_matches,
+                    body LIKE ?1 ESCAPE '\\' AS body_matches,
                     length(CAST(body AS BLOB))
              FROM notes
              WHERE lifecycle IN ('active', 'archived')
-               AND (instr(lower(derived_title), lower(?1)) > 0
-                    OR instr(lower(body), lower(?1)) > 0)
+               AND (derived_title LIKE ?1 ESCAPE '\\'
+                    OR body LIKE ?1 ESCAPE '\\')
              ORDER BY updated_at_ms DESC, id",
         )
         .map_err(|error| ApplicationError::storage("prepare_ascii_note_search", error))?;
     let rows = statement
-        .query_map(params![query], |row| {
+        .query_map(params![pattern], |row| {
             Ok((
                 row.get::<_, Vec<u8>>(0)?,
                 row.get::<_, String>(1)?,
@@ -2608,6 +2662,20 @@ fn search_ascii_notes(
         });
     }
     Ok(results)
+}
+
+fn ascii_like_pattern(query: &str) -> String {
+    // SQLite LIKE 对 ASCII 大小写不敏感；显式转义保留文字子串合同。
+    let mut pattern = String::with_capacity(query.len() + 2);
+    pattern.push('%');
+    for character in query.chars() {
+        if matches!(character, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    pattern
 }
 
 fn read_export_bundle(connection: &mut Connection) -> Result<ExportBundle, ApplicationError> {

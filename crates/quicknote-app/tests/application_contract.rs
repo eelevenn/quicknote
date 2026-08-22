@@ -7,6 +7,7 @@ use quicknote_app::{
     ExportBundle, NoteAction, NoteLifecycle, ReminderActivation, ReminderActivationAction,
     ReminderActivationOutcome, ReminderCoordinationReason, ReminderStatus, SaveState,
 };
+use rusqlite::Connection;
 use std::fs;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,7 +20,7 @@ fn first_open_and_reopen_preserve_schema_and_settings() {
     let initial = app.snapshot().expect("读取初始快照");
 
     assert_eq!(initial.schema.application_id, 0x514E_3031);
-    assert_eq!(initial.schema.version, 3);
+    assert_eq!(initial.schema.version, 4);
     assert_eq!(initial.active_note_count, 0);
     assert_eq!(initial.current_note_id, None);
     assert_eq!(initial.archived_note_count, 0);
@@ -39,6 +40,40 @@ fn first_open_and_reopen_preserve_schema_and_settings() {
     let persisted = reopened.snapshot().expect("读取持久化快照");
     assert_eq!(persisted.schema, initial.schema);
     assert_eq!(persisted.default_snooze_minutes, 30);
+}
+
+#[test]
+fn version_three_migration_rebuilds_and_keeps_search_index_current() {
+    let directory = TempDir::new().expect("创建迁移目录");
+    let app = Application::open(ApplicationConfig::new(directory.path())).expect("创建最新 schema");
+    app.edit(EditorIntent::ReplaceBody("迁移前 needle-old".to_owned()))
+        .expect("写入迁移夹具");
+    app.edit(EditorIntent::Flush).expect("保存迁移夹具");
+    drop(app);
+
+    let database_path = directory.path().join("quicknote.db");
+    let connection = Connection::open(&database_path).expect("打开迁移夹具数据库");
+    // 模拟真实 v3：正文保留，但还没有 FTS 表和同步触发器。
+    connection
+        .execute_batch(
+            "DROP TRIGGER note_search_after_insert;
+             DROP TRIGGER note_search_after_delete;
+             DROP TRIGGER note_search_after_content_update;
+             DROP TABLE note_search;
+             PRAGMA user_version = 3;",
+        )
+        .expect("还原 v3 结构");
+    drop(connection);
+
+    let app = Application::open(ApplicationConfig::new(directory.path())).expect("迁移到 v4");
+    assert_eq!(app.snapshot().expect("读取迁移后 schema").schema.version, 4);
+    assert_eq!(app.search("needle-old").expect("搜索迁移前正文").len(), 1);
+
+    app.edit(EditorIntent::ReplaceBody("迁移后 needle-new".to_owned()))
+        .expect("更新迁移后正文");
+    app.edit(EditorIntent::Flush).expect("保存迁移后正文");
+    assert!(app.search("needle-old").expect("旧索引已删除").is_empty());
+    assert_eq!(app.search("needle-new").expect("新索引已写入").len(), 1);
 }
 
 #[test]
@@ -260,7 +295,7 @@ fn search_is_literal_case_insensitive_and_excludes_trash() {
     let directory = TempDir::new().expect("创建临时目录");
     let app = Application::open(ApplicationConfig::new(directory.path())).expect("打开应用");
     app.edit(EditorIntent::ReplaceBody(
-        "Alpha 标题\n含有中文针脚".to_owned(),
+        "Alpha 标题\n含有中文针脚和 100%_literal\\path、quoted\"literal".to_owned(),
     ))
     .expect("编辑活跃便签");
     let active = app
@@ -286,6 +321,11 @@ fn search_is_literal_case_insensitive_and_excludes_trash() {
     let chinese = app.search("中文针脚").expect("中文正文子串搜索");
     assert_eq!(chinese.len(), 1);
     assert_eq!(chinese[0].id, active);
+    for literal in ["%_", "100%", "\\path", "ted\"lit"] {
+        let matches = app.search(literal).expect("ASCII 通配符按普通文字搜索");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, active);
+    }
 
     app.apply_note_action(NoteAction::MoveToTrash(archived))
         .expect("归档便签进入回收站");

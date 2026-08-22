@@ -2,12 +2,14 @@
 
 use quicknote_app::{Application, ApplicationConfig, NoteLifecycle};
 use rusqlite::{Connection, TransactionBehavior, params};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use uuid::Uuid;
 
 const NOTE_COUNT: usize = 10_000;
 const TOTAL_BODY_BYTES: usize = 100 * 1024 * 1024;
+const SEARCH_RUNS: usize = 20;
+const SEARCH_P95_BUDGET: Duration = Duration::from_millis(200);
 
 #[test]
 #[ignore = "规模验收会创建 100 MiB 临时数据库，按发布门槛显式运行"]
@@ -18,21 +20,34 @@ fn searches_ten_thousand_notes_and_one_hundred_mib_without_truncation() {
     seed_scale_fixture(directory.path().join("quicknote.db"));
 
     let app = Application::open(ApplicationConfig::new(directory.path())).expect("打开规模数据集");
-    let started = Instant::now();
-    let english = app.search("nEeDlE-09998").expect("英文正文子串搜索");
-    let elapsed = started.elapsed();
-    assert_eq!(english.len(), 1);
-    assert_eq!(english[0].lifecycle, NoteLifecycle::Archived);
-    assert!(english[0].matched_in_body);
+    let mut samples = Vec::with_capacity(SEARCH_RUNS);
+    for _ in 0..SEARCH_RUNS {
+        let started = Instant::now();
+        let english = app.search("nEeDlE-09998").expect("英文正文子串搜索");
+        samples.push(started.elapsed());
+        assert_eq!(english.len(), 1);
+        assert_eq!(english[0].lifecycle, NoteLifecycle::Archived);
+        assert!(english[0].matched_in_body);
+    }
     assert_eq!(app.search("中文针脚").expect("中文搜索").len(), 1);
     assert!(
         app.search("trashed-only")
             .expect("搜索排除回收站")
             .is_empty()
     );
+    samples.sort_unstable();
+    // 采用 nearest-rank P95；20 个样本时第 19 个有序样本就是 P95。
+    let p95_index = (samples.len() * 95).div_ceil(100).saturating_sub(1);
+    let p95 = samples[p95_index];
     eprintln!(
-        "10,000 张 / 100 MiB 英文正文子串搜索耗时：{} ms",
-        elapsed.as_millis()
+        "10,000 张 / 100 MiB 英文正文子串搜索 P95：{:.3} ms；样本：{samples:?}",
+        p95.as_secs_f64() * 1_000.0
+    );
+    assert!(
+        p95 <= SEARCH_P95_BUDGET,
+        "搜索 P95 {} ms 超过 {} ms 发布门槛",
+        p95.as_millis(),
+        SEARCH_P95_BUDGET.as_millis()
     );
 }
 
