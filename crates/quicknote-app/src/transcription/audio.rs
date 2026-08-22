@@ -68,7 +68,7 @@ impl SpeechGate {
         self.detector.reset();
         let mut scores = Vec::with_capacity(samples.len() / VAD_FRAME_SAMPLES);
         let mut energized = Vec::with_capacity(scores.capacity());
-        for frame in samples.chunks_exact(VAD_FRAME_SAMPLES) {
+        for frame in samples.as_chunks::<VAD_FRAME_SAMPLES>().0 {
             let rms = root_mean_square(frame);
             let score = self.detector.predict_i16(frame).clamp(0.0, 1.0);
             scores.push(score);
@@ -239,8 +239,10 @@ pub fn read_pcm16_wave(path: &Path) -> Result<Pcm16Wave, TranscriptionError> {
         ));
     }
     let samples = data
-        .chunks_exact(2)
-        .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|bytes| i16::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     if samples.len() > SAMPLE_RATE_HZ as usize * MAX_RECORDING_SECONDS as usize {
         return Err(TranscriptionError::new(

@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2024"
 # Slint 1.17.1 的最低 Rust 版本为 1.92。
 rust-version = "1.92"
-license = "Proprietary"
+license = "MIT"
 publish = false
 
 [workspace.dependencies]
