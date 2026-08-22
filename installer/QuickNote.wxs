@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" RequiredVersion="4.0.6">
+  <!-- ProductCode 按语义版本确定性生成；同版本进入维修模式，新版本进入 Major Upgrade。 -->
+  <Package
+    Name="QuickNote"
+    Manufacturer="eelevenn"
+    Version="$(var.ProductVersion)"
+    ProductCode="$(var.ProductCode)"
+    UpgradeCode="{22D55004-7823-4192-A3D2-046F408953B1}"
+    Scope="perUser"
+    InstallerVersion="500"
+    Compressed="yes">
+
+    <!-- 旧版本在事务内移除；新版本失败时 Windows Installer 可以回滚旧版本。 -->
+    <MajorUpgrade
+      Schedule="afterInstallInitialize"
+      DowngradeErrorMessage="已安装更新版本的 QuickNote。" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Windows 11 25H2 的初始 OS build 为 26200；已安装产品始终允许维修或卸载。 -->
+    <Launch
+      Condition="Installed OR WindowsBuild &gt;= 26200"
+      Message="QuickNote 需要 Windows 11 25H2（OS build 26200）或更新版本。" />
+
+    <!-- 仅最终卸载清理应用拥有的自启动值；Major Upgrade 必须保留用户设置。 -->
+    <CustomAction
+      Id="RemoveUserIntegration"
+      FileRef="QuickNoteExecutable"
+      ExeCommand="--unregister-user-integration"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="check" />
+    <InstallExecuteSequence>
+      <Custom
+        Action="RemoveUserIntegration"
+        Before="RemoveFiles"
+        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="UserProgramsDirectory" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="QuickNote" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="ProductFeature" Title="QuickNote" Level="1">
+      <ComponentRef Id="QuickNoteExecutableComponent" />
+      <ComponentRef Id="StartMenuShortcutComponent" />
+      <ComponentRef Id="WindowsIdentityComponent" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component
+        Id="QuickNoteExecutableComponent"
+        Guid="{91319713-8ADA-4474-AC52-B7AEC90703D3}"
+        Bitness="always64">
+        <!-- 主安装器只包含应用本体；本地转写包继续按需单独下载和计量。 -->
+        <File
+          Id="QuickNoteExecutable"
+          Source="$(var.QuickNoteExecutable)"
+          Name="QuickNote.exe"
+          KeyPath="yes"
+          Checksum="yes" />
+      </Component>
+
+      <Component
+        Id="WindowsIdentityComponent"
+        Guid="{972E01E4-B3A9-4861-80EB-A986D8D19F00}"
+        Bitness="always64">
+        <!-- 安装器先建立稳定身份；应用启动时会补写带 AUMID 属性的开始菜单快捷方式。 -->
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Classes\AppUserModelId\eelevenn.QuickNote"
+          Name="DisplayName"
+          Type="string"
+          Value="QuickNote"
+          KeyPath="yes" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Classes\AppUserModelId\eelevenn.QuickNote"
+          Name="ExecutablePath"
+          Type="string"
+          Value="[INSTALLFOLDER]QuickNote.exe" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Classes\CLSID\{7E5ACBFA-9501-4F8A-9C85-60C1AE5D17C4}\LocalServer32"
+          Type="string"
+          Value="&quot;[INSTALLFOLDER]QuickNote.exe&quot; --toast-activated" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Classes\quicknote"
+          Type="string"
+          Value="URL:QuickNote Protocol" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Classes\quicknote"
+          Name="URL Protocol"
+          Type="string"
+          Value="" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Classes\quicknote\shell\open\command"
+          Type="string"
+          Value="&quot;[INSTALLFOLDER]QuickNote.exe&quot; &quot;%1&quot;" />
+
+        <!-- 应用可能在运行时修复这些键；最终卸载时按稳定根键完整清理。 -->
+        <RemoveRegistryKey
+          Id="RemoveQuickNoteProtocol"
+          Root="HKCU"
+          Key="Software\Classes\quicknote"
+          Action="removeOnUninstall" />
+        <RemoveRegistryKey
+          Id="RemoveQuickNoteAppUserModelId"
+          Root="HKCU"
+          Key="Software\Classes\AppUserModelId\eelevenn.QuickNote"
+          Action="removeOnUninstall" />
+        <RemoveRegistryKey
+          Id="RemoveQuickNoteToastActivator"
+          Root="HKCU"
+          Key="Software\Classes\CLSID\{7E5ACBFA-9501-4F8A-9C85-60C1AE5D17C4}"
+          Action="removeOnUninstall" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component
+        Id="StartMenuShortcutComponent"
+        Guid="{B7046A57-390A-4000-9488-5599CF589005}">
+        <Shortcut
+          Id="ApplicationStartMenuShortcut"
+          Name="QuickNote"
+          Description="快速记录便签"
+          Target="[INSTALLFOLDER]QuickNote.exe"
+          WorkingDirectory="INSTALLFOLDER">
+          <!-- 通知平台要求开始菜单快捷方式与进程使用同一稳定身份。 -->
+          <ShortcutProperty Key="System.AppUserModel.ID" Value="eelevenn.QuickNote" />
+          <ShortcutProperty
+            Key="System.AppUserModel.ToastActivatorCLSID"
+            Value="{7E5ACBFA-9501-4F8A-9C85-60C1AE5D17C4}" />
+        </Shortcut>
+        <!-- HKCU 标记是每用户快捷方式组件的稳定 KeyPath。 -->
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\eelevenn\QuickNote\Installer"
+          Name="StartMenuShortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+        <RemoveRegistryKey
+          Id="RemoveQuickNoteInstallerMarker"
+          Root="HKCU"
+          Key="Software\eelevenn\QuickNote\Installer"
+          Action="removeOnUninstall" />
+      </Component>
+    </StandardDirectory>
+  </Fragment>
+</Wix>

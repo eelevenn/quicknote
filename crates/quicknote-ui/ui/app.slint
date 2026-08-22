@@ -119,6 +119,7 @@ export component MainWindow inherits Window {
     in-out property <string> shortcut-text: "Ctrl+Alt+Q";
     in property <string> shortcut-status: "全局快捷键已启用";
     in-out property <bool> startup-enabled: false;
+    in property <string> application-version: "0.1.0";
     in property <int> snooze-minutes: 10;
     in property <string> action-status;
     in-out property <string> due-time-text;
@@ -530,7 +531,7 @@ export component MainWindow inherits Window {
                 }
                 Text { text: root.action-status; wrap: word-wrap; color: Palette.alternate-foreground; accessible-label: root.action-status; }
                 Text {
-                    text: "QuickNote 0.1.0 · 本地优先 · 第三方许可证随应用分发";
+                    text: "QuickNote " + root.application-version + " · 本地优先 · 第三方许可证随应用分发";
                     wrap: word-wrap;
                     color: Palette.alternate-foreground;
                 }

@@ -1,0 +1,32 @@
+name: Unsigned SignPath preview
+
+on:
+  push:
+    tags:
+      - "v*-signpath-preview.*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-preview:
+    name: Build unsigned Windows preview
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      # 预览产物只用于满足 SignPath 的既有发行版审核，不得冒充正式发布。
+      - name: Build traceable unsigned preview
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"$').Matches[0].Groups['version'].Value
+          .\scripts\New-QuickNoteUnsignedPreview.ps1 -Version $version
+      - name: Upload preview evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: quicknote-unsigned-signpath-preview
+          path: artifacts/unsigned-signpath-preview/*
+          if-no-files-found: error
+          retention-days: 30

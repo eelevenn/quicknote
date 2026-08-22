@@ -416,6 +416,8 @@ fn shortcut_key_name(key: ShortcutKey) -> String {
 pub enum ActivationRequest {
     /// 显示并聚焦主页。
     ShowMain,
+    /// 登录后只启动后台能力，不主动显示窗口。
+    BackgroundStartup,
     /// 显示并聚焦快速记录窗。
     ShowQuickCapture,
     /// 全局快捷键触发，由 UI 线程按焦点三态决定最终动作。

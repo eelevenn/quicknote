@@ -34,6 +34,14 @@ cargo test -p quicknote-app --test search_scale -- --ignored --nocapture
 # 在 Windows x64 上生成生产 Release 构建。
 # 此命令同时构建按需 sidecar，但不会把模型或运行时放进应用本体。
 .\scripts\build-windows.ps1
+
+# 构建并静态检查未签名的每用户 MSI；只用于开发和 CI。
+.\scripts\Build-QuickNoteInstaller.ps1 -SkipApplicationBuild
+.\scripts\Test-QuickNoteInstaller.ps1 `
+  -InstallerPath .\artifacts\release-candidate\QuickNote-0.1.0-x64.msi `
+  -AllowUnsigned
 ```
 
 Windows 生产身份固定为产品名 `QuickNote`、AUMID `eelevenn.QuickNote`、协议 `quicknote`，数据位于 `%LOCALAPPDATA%\QuickNote\`。
+
+正式候选必须先签所有 PE，再构建并签 MSI；入口为 `scripts/New-QuickNoteReleaseCandidate.ps1`。该命令只接受当前 workspace 版本和有效的当前用户代码签名证书，不提供跳过签名的发布模式。安装器路线、干净系统矩阵及仍需人工完成的门槛见 [Issue 22 发布候选门槛](docs/release-gates/issue-22-release-candidate.md)。

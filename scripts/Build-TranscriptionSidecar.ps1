@@ -62,8 +62,8 @@ $developerShell = Join-Path $visualStudio 'VC\Auxiliary\Build\vcvars64.bat'
 $object = Join-Path $outputDirectory 'quicknote-sensevoice-sidecar.obj'
 $programDatabase = Join-Path $outputDirectory 'quicknote-sensevoice-sidecar.pdb'
 
-# 显式指定中间产物，避免 cmd 在 UNC 工作目录回退到 Windows 系统目录。
-$compile = '"{0}" && cl.exe /nologo /O2 /EHsc /std:c++17 /utf-8 /Fo"{1}" /Fd"{2}" "{3}" /I"{4}" /link "{5}" /OUT:"{6}"' -f $developerShell, $object, $programDatabase, $source, $include, $library, $OutputPath
+# 显式使用静态 CRT，并指定中间产物，避免目标机依赖 VC Redist 或 UNC 工作目录回退。
+$compile = '"{0}" && cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 /Fo"{1}" /Fd"{2}" "{3}" /I"{4}" /link "{5}" /OUT:"{6}"' -f $developerShell, $object, $programDatabase, $source, $include, $library, $OutputPath
 & cmd.exe /d /s /c $compile
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $OutputPath)) {
     throw "SenseVoice sidecar 构建失败，退出码：$LASTEXITCODE"

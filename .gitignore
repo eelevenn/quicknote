@@ -1,6 +1,7 @@
 # Rust 构建产物。
 /target/
 /artifacts/
+/.scratch/
 
 # 本地应用数据和临时验证文件。
 /.quicknote-data/
