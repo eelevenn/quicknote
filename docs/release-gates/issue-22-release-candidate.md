@@ -4,6 +4,19 @@
 
 安装器选型与一手资料见 [生产安装器调研](../research/issue-22-installer-selection.md)。结论固定为 WiX x64、per-user MSI，不使用 Burn、IExpress 或自研自解压 EXE。
 
+## SignPath Foundation 申请预览例外
+
+SignPath Foundation 要求申请项目已经公开发布需要签名的二进制形式。为取得免费开源签名资格，允许发布一个严格隔离的未签名 GitHub **Pre-release**，但它不是 MVP 发布候选，也不得推广给普通用户：
+
+- 标签必须使用 `v<version>-signpath-preview.<n>`，并由 `.github/workflows/unsigned-signpath-preview.yml` 从干净提交构建。
+- Release 标题和正文必须显著写明 `UNSIGNED`、`SignPath application preview` 和 `Do not install for normal use`。
+- 只附加 MSI、来源清单与 SHA-256 清单；不得附加本地工作树构建物、PDB、模型或上游 runtime。
+- Release 必须勾选 Pre-release，不得设置为 Latest，不得出现在 README 的普通下载入口。
+- 预览 MSI 的 `NotSigned` 状态是预期证据；它不能用于关闭本 Issue，也不能替代任何签名、SmartScreen 或干净系统门槛。
+- SignPath 审核完成后保留该 Release 作为申请证据；正式签名版本使用新的不可变版本和产物。
+
+创建公开 Pre-release 是外部发布动作，必须在执行前取得仓库所有者明确确认。
+
 ## 固定发布契约
 
 | 项目 | 固定值 |
