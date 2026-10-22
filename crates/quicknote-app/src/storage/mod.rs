@@ -1,6 +1,9 @@
 //! SQLite 单写者与应用命令实现。
 
+mod backup;
 mod migrations;
+
+pub use backup::{BackupInfo, BackupStatus, RecoverySession};
 
 use crate::platform::{GlobalShortcut, NotificationProjectionKey, PlatformCommand};
 use crate::{
@@ -114,6 +117,10 @@ pub(crate) struct SaveRequest {
 }
 
 enum StorageRequest {
+    BackupStatus {
+        retry: bool,
+        respond_to: Sender<Result<BackupStatus, ApplicationError>>,
+    },
     Execute {
         command: Command,
         respond_to: Sender<Result<CommandResult, ApplicationError>>,
@@ -216,6 +223,10 @@ enum StorageRequest {
     ExportBundle {
         respond_to: Sender<Result<ExportBundle, ApplicationError>>,
     },
+    ExportNote {
+        note_id: Uuid,
+        respond_to: Sender<Result<(NoteDocument, Option<i64>), ApplicationError>>,
+    },
     Shutdown,
 }
 
@@ -298,6 +309,18 @@ pub(crate) struct StorageClient {
 }
 
 impl StorageClient {
+    /// 读取备份警告或明确重试；仍由唯一存储线程操作活动连接。
+    pub(crate) fn backup_status(&self, retry: bool) -> Result<BackupStatus, ApplicationError> {
+        let (respond_to, response) = mpsc::channel();
+        self.sender
+            .send(StorageRequest::BackupStatus { retry, respond_to })
+            .map_err(writer_disconnected)?;
+        response
+            .recv()
+            .map_err(|error| ApplicationError::WriterUnavailable {
+                message: error.to_string(),
+            })?
+    }
     pub(crate) fn execute(&self, command: Command) -> Result<CommandResult, ApplicationError> {
         let (respond_to, response) = mpsc::channel();
         self.sender
@@ -594,6 +617,21 @@ impl StorageClient {
             .map_err(writer_disconnected)?;
         response.recv().map_err(writer_disconnected)?
     }
+
+    /// 单张导出同时读取正文和独立提醒，避免两个查询之间混入其他修订。
+    pub(crate) fn export_note(
+        &self,
+        note_id: Uuid,
+    ) -> Result<(NoteDocument, Option<i64>), ApplicationError> {
+        let (respond_to, response) = mpsc::channel();
+        self.sender
+            .send(StorageRequest::ExportNote {
+                note_id,
+                respond_to,
+            })
+            .map_err(writer_disconnected)?;
+        response.recv().map_err(writer_disconnected)?
+    }
 }
 
 /// 独占 SQLite 连接并串行处理所有读写请求。
@@ -652,21 +690,41 @@ fn run_writer(
 ) {
     let mut faults = StorageFaultRuntime::new(faults);
     let mut maintenance = MaintenanceSchedule::new(Instant::now());
+    let mut backups = backup::BackupMaintenance::new(&connection);
     loop {
-        let request = match receiver.recv_timeout(maintenance.wait_from(Instant::now())) {
+        let request = match receiver.recv_timeout(
+            maintenance
+                .wait_from(Instant::now())
+                .min(Duration::from_secs(30)),
+        ) {
             Ok(request) => request,
             Err(RecvTimeoutError::Timeout) => {
-                maintain_trash_if_due(&mut connection, &mut maintenance);
+                maintain_trash_if_due(&mut connection, &mut maintenance, &mut backups);
+                backups.tick(&connection);
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => break,
         };
+        // total_changes 包含回滚操作；还要确认用户事务成功，才允许占用当日备份。
+        let mut committed_user_write = false;
+        let changes_before = connection.total_changes();
         match request {
+            StorageRequest::BackupStatus { retry, respond_to } => {
+                if retry {
+                    if backups.trash_warning.is_some() {
+                        let _ = maintain_trash(&mut connection, &mut backups);
+                    }
+                    backups.after_write(&connection, true);
+                }
+                let _ = respond_to.send(Ok(backups.status()));
+            }
             StorageRequest::Execute {
                 command,
                 respond_to,
             } => {
-                let _ = respond_to.send(execute_command(&mut connection, command));
+                let result = execute_command(&mut connection, command);
+                committed_user_write = result.is_ok();
+                let _ = respond_to.send(result);
             }
             StorageRequest::Snapshot { respond_to } => {
                 let _ = respond_to.send(read_snapshot(&connection));
@@ -678,6 +736,7 @@ fn run_writer(
                 let result =
                     write_setting(&mut connection, "global_shortcut", &shortcut.to_string())
                         .map(|_| ());
+                committed_user_write = result.is_ok();
                 let _ = respond_to.send(result);
             }
             StorageRequest::PersistStartupEnabled {
@@ -686,6 +745,7 @@ fn run_writer(
             } => {
                 let result =
                     write_setting(&mut connection, "startup_enabled", &enabled).map(|_| ());
+                committed_user_write = result.is_ok();
                 let _ = respond_to.send(result);
             }
             StorageRequest::LoadEditingView { respond_to } => {
@@ -700,18 +760,18 @@ fn run_writer(
                 if !save_delay.is_zero() {
                     thread::sleep(save_delay);
                 }
-                let _ = respond_to.send(save_document(&mut connection, request, fail_after_write));
+                let result = save_document(&mut connection, request, fail_after_write);
+                committed_user_write = result.is_ok();
+                let _ = respond_to.send(result);
             }
             StorageRequest::SwitchCurrent {
                 note_id,
                 respond_to,
             } => {
                 let fail_after_write = faults.fail_next_switch_after_write();
-                let _ = respond_to.send(switch_current_note(
-                    &mut connection,
-                    note_id,
-                    fail_after_write,
-                ));
+                let result = switch_current_note(&mut connection, note_id, fail_after_write);
+                committed_user_write = result.is_ok();
+                let _ = respond_to.send(result);
             }
             StorageRequest::LibrarySnapshot { respond_to } => {
                 let _ = respond_to.send(read_library_snapshot(&connection));
@@ -726,7 +786,13 @@ fn run_writer(
                 let _ = respond_to.send(search_notes(&connection, &query));
             }
             StorageRequest::ApplyNoteAction { action, respond_to } => {
-                let _ = respond_to.send(apply_note_action(&mut connection, action));
+                let permanent = matches!(action, NoteAction::PermanentlyDelete(_));
+                let result = apply_note_action(&mut connection, action);
+                committed_user_write = result.is_ok();
+                if permanent && result.is_ok() {
+                    backups.after_write(&connection, true);
+                }
+                let _ = respond_to.send(result);
             }
             StorageRequest::SetDueAt {
                 note_id,
@@ -734,7 +800,9 @@ fn run_writer(
                 timestamp,
                 respond_to,
             } => {
-                let _ = respond_to.send(set_due_at(&mut connection, note_id, due_at_ms, timestamp));
+                let result = set_due_at(&mut connection, note_id, due_at_ms, timestamp);
+                committed_user_write = result.is_ok();
+                let _ = respond_to.send(result);
             }
             StorageRequest::SetReminder {
                 note_id,
@@ -742,12 +810,9 @@ fn run_writer(
                 timestamp,
                 respond_to,
             } => {
-                let _ = respond_to.send(set_reminder(
-                    &mut connection,
-                    note_id,
-                    scheduled_at_ms,
-                    timestamp,
-                ));
+                let result = set_reminder(&mut connection, note_id, scheduled_at_ms, timestamp);
+                committed_user_write = result.is_ok();
+                let _ = respond_to.send(result);
             }
             StorageRequest::ReadNoteTiming {
                 note_id,
@@ -760,19 +825,18 @@ fn run_writer(
                 timestamp,
                 respond_to,
             } => {
-                let _ =
-                    respond_to.send(respond_to_due_reminder(&mut connection, note_id, timestamp));
+                let result = respond_to_due_reminder(&mut connection, note_id, timestamp);
+                committed_user_write = result.is_ok();
+                let _ = respond_to.send(result);
             }
             StorageRequest::HandleReminderActivation {
                 activation,
                 timestamp,
                 respond_to,
             } => {
-                let _ = respond_to.send(handle_reminder_activation(
-                    &mut connection,
-                    activation,
-                    timestamp,
-                ));
+                let result = handle_reminder_activation(&mut connection, activation, timestamp);
+                committed_user_write = result.is_ok();
+                let _ = respond_to.send(result);
             }
             StorageRequest::AdvanceDueReminders {
                 timestamp,
@@ -781,13 +845,15 @@ fn run_writer(
                 cancel_missed_projection,
                 respond_to,
             } => {
-                let _ = respond_to.send(advance_due_reminders(
+                let result = advance_due_reminders(
                     &mut connection,
                     timestamp,
                     focused_note_id,
                     focused_since_ms,
                     cancel_missed_projection,
-                ));
+                );
+                committed_user_write = result.is_ok();
+                let _ = respond_to.send(result);
             }
             StorageRequest::ReconcileReminderProjections {
                 scheduled,
@@ -830,27 +896,74 @@ fn run_writer(
                 let _ = respond_to.send(pending_reminder_projection_count(&connection));
             }
             StorageRequest::MaintainTrash { respond_to } => {
-                let _ = respond_to.send(purge_expired_trash(&mut connection, now_ms()));
+                let result = maintain_trash(&mut connection, &mut backups);
+                if result.is_err() {
+                    maintenance.next_run = Instant::now() + Duration::from_secs(3_600);
+                }
+                let _ = respond_to.send(result);
             }
             StorageRequest::ExportBundle { respond_to } => {
                 let _ = respond_to.send(read_export_bundle(&mut connection));
             }
+            StorageRequest::ExportNote {
+                note_id,
+                respond_to,
+            } => {
+                let _ = respond_to.send(read_export_note(&mut connection, note_id));
+            }
             StorageRequest::Shutdown => break,
         }
-        maintain_trash_if_due(&mut connection, &mut maintenance);
+        if committed_user_write && connection.total_changes() > changes_before {
+            backups.after_write(&connection, false);
+        }
+        backups.tick(&connection);
+        maintain_trash_if_due(&mut connection, &mut maintenance, &mut backups);
     }
     // 正常退出收敛 WAL，失败只影响维护状态，不破坏已提交事务。
-    let _ = connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    if connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .is_ok()
+        && let Ok(directory) = backup::data_directory(&connection)
+    {
+        let _ = std::fs::remove_file(directory.join("session-open"));
+    }
 }
 
-fn maintain_trash_if_due(connection: &mut Connection, maintenance: &mut MaintenanceSchedule) {
+fn maintain_trash_if_due(
+    connection: &mut Connection,
+    maintenance: &mut MaintenanceSchedule,
+    backups: &mut backup::BackupMaintenance,
+) {
     let now = Instant::now();
     if !maintenance.is_due(now) {
         return;
     }
-    // 后台维护失败不终止单写者；下一次显式维护仍会返回错误。
-    let _ = purge_expired_trash(connection, now_ms());
-    maintenance.mark_completed(now);
+    // 暂时占用只推迟清理；一小时后再试，并向设置页报告未完成的维护。
+    if maintain_trash(connection, backups).is_ok() {
+        maintenance.mark_completed(now);
+    } else {
+        maintenance.next_run = now + Duration::from_secs(3_600);
+    }
+}
+
+/// 启动、后台和显式维护共享错误状态，避免静默失败或误报永久清除成功。
+fn maintain_trash(
+    connection: &mut Connection,
+    backups: &mut backup::BackupMaintenance,
+) -> Result<u64, ApplicationError> {
+    let result = purge_expired_trash(connection, now_ms());
+    match &result {
+        Ok(count) => {
+            backups.trash_warning = None;
+            if *count > 0 {
+                backups.after_write(connection, true);
+            }
+        }
+        Err(error) => {
+            backups.trash_warning = Some(format!("回收站清理暂未完成，便签已保留，可重试：{error}"))
+        }
+    }
+    result
 }
 
 fn execute_command(
@@ -1337,6 +1450,9 @@ fn apply_note_action(
             if changed != 1 {
                 return Err(invalid_lifecycle("只有回收站便签可以永久清除"));
             }
+            purge_orphaned_reminder_history(&transaction)?;
+            // 备份移除失败时回滚删除，不能向用户宣告已经永久清除。
+            backup::clear_history(&transaction)?;
         }
     }
 
@@ -2009,6 +2125,16 @@ fn complete_reminder_projection(
     connection: &mut Connection,
     outbox_id: i64,
 ) -> Result<(), ApplicationError> {
+    // 取消成功后即可移除最小投影墓碑，防止永久清除的操作历史无限累积。
+    let removed = connection
+        .execute(
+            "DELETE FROM reminder_outbox WHERE id = ?1 AND projection_kind = 'cancel'",
+            [outbox_id],
+        )
+        .map_err(|error| ApplicationError::storage("complete_notification_cancel", error))?;
+    if removed > 0 {
+        return Ok(());
+    }
     connection
         .execute(
             "UPDATE reminder_outbox SET delivered_at_ms = ?1, last_error = NULL
@@ -2054,13 +2180,12 @@ fn fail_reminder_projection(
 }
 
 fn reminder_retry_delay_ms(attempt_count: i64) -> i64 {
+    // 按产品合同退避，持续失败也必须在一小时内获得下一次重试机会。
     match attempt_count {
-        ..=1 => 1_000,
-        2 => 5_000,
-        3 => 30_000,
-        4 => 5 * 60_000,
-        5 => 30 * 60_000,
-        _ => 6 * 60 * 60_000,
+        ..=1 => 5_000,
+        2 => 30_000,
+        3 => 5 * 60_000,
+        _ => 60 * 60_000,
     }
 }
 
@@ -2117,6 +2242,43 @@ fn decode_optional_reminder(
     }
 }
 
+/// 删除正文载荷及动作收据；只暂留不含便签内容的系统通知取消意图。
+fn purge_orphaned_reminder_history(transaction: &Transaction<'_>) -> Result<(), ApplicationError> {
+    let orphaned = {
+        let mut statement = transaction.prepare(
+            "SELECT DISTINCT reminder_id FROM reminder_outbox AS outbox
+             WHERE projection_kind = 'schedule' AND NOT EXISTS (
+                 SELECT 1 FROM notes
+                 WHERE lower(hex(notes.id)) = replace(json_extract(outbox.payload_json, '$.note_id'), '-', '')
+             )",
+        ).map_err(|error| ApplicationError::storage("find_purged_reminder_history", error))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|error| ApplicationError::storage("read_purged_reminder_history", error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ApplicationError::storage("decode_purged_reminder_history", error))?
+    };
+    for reminder in orphaned {
+        transaction
+            .execute(
+                "DELETE FROM activation_receipts WHERE reminder_id = ?1",
+                [&reminder],
+            )
+            .map_err(|error| ApplicationError::storage("purge_reminder_receipts", error))?;
+        transaction
+            .execute(
+                "DELETE FROM reminder_outbox WHERE reminder_id = ?1
+             AND (projection_kind = 'schedule' OR delivered_at_ms IS NOT NULL)",
+                [&reminder],
+            )
+            .map_err(|error| ApplicationError::storage("purge_reminder_payloads", error))?;
+        transaction.execute(
+            "UPDATE reminder_outbox SET payload_json = '{}', last_error = NULL WHERE reminder_id = ?1", [&reminder],
+        ).map_err(|error| ApplicationError::storage("scrub_cancel_history", error))?;
+    }
+    Ok(())
+}
+
 fn purge_expired_trash(
     connection: &mut Connection,
     timestamp: i64,
@@ -2132,6 +2294,10 @@ fn purge_expired_trash(
             params![cutoff],
         )
         .map_err(|error| ApplicationError::storage("purge_expired_trash", error))?;
+    if deleted > 0 {
+        purge_orphaned_reminder_history(&transaction)?;
+        backup::clear_history(&transaction)?;
+    }
     let timestamp_json = serde_json::to_string(&timestamp)
         .map_err(|error| ApplicationError::storage("encode_maintenance_cursor", error))?;
     transaction
@@ -2678,6 +2844,29 @@ fn ascii_like_pattern(query: &str) -> String {
     pattern
 }
 
+/// 提醒与便签正文来自同一个只读事务，归档和回收站自然返回空提醒。
+fn read_export_note(
+    connection: &mut Connection,
+    note_id: Uuid,
+) -> Result<(NoteDocument, Option<i64>), ApplicationError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(|error| ApplicationError::storage("begin_single_note_export", error))?;
+    let note = read_note(&transaction, note_id)?;
+    let reminder_at_ms = transaction
+        .query_row(
+            "SELECT scheduled_at_ms FROM reminders WHERE note_id = ?1",
+            params![note_id.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| ApplicationError::storage("read_export_note_reminder", error))?;
+    transaction
+        .commit()
+        .map_err(|error| ApplicationError::storage("commit_single_note_export", error))?;
+    Ok((note, reminder_at_ms))
+}
+
 fn read_export_bundle(connection: &mut Connection) -> Result<ExportBundle, ApplicationError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -2708,9 +2897,10 @@ fn read_export_bundle(connection: &mut Connection) -> Result<ExportBundle, Appli
         .map_err(|error| ApplicationError::storage("commit_export_snapshot", error))?;
     Ok(ExportBundle {
         format_version: 1,
+        app_version: env!("CARGO_PKG_VERSION").to_owned(),
         exported_at_ms,
         current_note_id,
-        notes,
+        notes: notes.into_iter().map(Into::into).collect(),
         reminders,
         settings: ExportSettings {
             global_shortcut: shortcut,
@@ -2855,6 +3045,40 @@ fn now_ms() -> i64 {
 mod tests {
     use super::{MAINTENANCE_INTERVAL, MaintenanceSchedule, derive_title};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn failed_notification_projection_obeys_retry_deadlines_and_one_hour_cap() {
+        // 使用真实 schema 和 outbox，验证平台失败后不会提前重试或无限延后。
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = crate::ApplicationConfig::new(directory.path());
+        let mut connection = super::open_database(&config, super::MigrationFault::None).unwrap();
+        let mut timestamp = 1_700_000_000_000;
+        let transaction = connection.transaction().unwrap();
+        super::queue_cancel_projection(&transaction, uuid::Uuid::now_v7(), 1, timestamp).unwrap();
+        transaction.commit().unwrap();
+        let outbox_id: i64 = connection
+            .query_row("SELECT id FROM reminder_outbox", [], |row| row.get(0))
+            .unwrap();
+
+        for delay in [5_000, 30_000, 300_000, 3_600_000, 3_600_000, 3_600_000] {
+            super::fail_reminder_projection(&mut connection, outbox_id, timestamp, "平台离线")
+                .unwrap();
+            assert!(
+                super::read_ready_reminder_projections(&mut connection, timestamp + delay - 1)
+                    .unwrap()
+                    .is_empty(),
+                "到达 {delay}ms 退避期限前不得重新投影"
+            );
+            timestamp += delay;
+            assert_eq!(
+                super::read_ready_reminder_projections(&mut connection, timestamp)
+                    .unwrap()
+                    .len(),
+                1,
+                "达到退避期限后应恢复重试，最长不超过一小时"
+            );
+        }
+    }
 
     #[test]
     fn title_uses_first_non_empty_line_without_splitting_unicode() {

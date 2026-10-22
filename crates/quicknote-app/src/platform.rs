@@ -414,6 +414,8 @@ fn shortcut_key_name(key: ShortcutKey) -> String {
 /// 平台壳送入共享应用的激活事件。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ActivationRequest {
+    /// 用户从托盘明确退出；壳必须先成功刷新编辑再退出。
+    ExitRequested,
     /// 显示并聚焦主页。
     ShowMain,
     /// 登录后只启动后台能力，不主动显示窗口。

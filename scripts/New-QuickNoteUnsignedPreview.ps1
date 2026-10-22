@@ -48,7 +48,8 @@ if ($Version -ne $Matches.version) {
 }
 
 & (Join-Path $PSScriptRoot 'build-windows.ps1')
-$executable = Join-Path $repositoryRoot 'target\x86_64-pc-windows-msvc\release\quicknote-windows.exe'
+. (Join-Path $PSScriptRoot 'Get-QuickNoteBuild.ps1')
+$executable = (Get-QuickNoteBuild -RepositoryRoot $repositoryRoot).Executable
 & (Join-Path $PSScriptRoot 'Test-WindowsRuntimeDependencies.ps1') `
     -Path $executable `
     -OutputDirectory $OutputDirectory

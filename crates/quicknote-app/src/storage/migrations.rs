@@ -20,6 +20,7 @@ pub(crate) fn open_database(
     data_directory: &Path,
     fault: MigrationFault,
 ) -> Result<Connection, ApplicationError> {
+    super::backup::require_recovery_if_pending(data_directory)?;
     fs::create_dir_all(data_directory)
         .map_err(|error| ApplicationError::storage("create_data_directory", error))?;
     let database_path = data_directory.join("quicknote.db");
@@ -31,10 +32,10 @@ pub(crate) fn open_database(
 
     let found_id: i32 = connection
         .pragma_query_value(None, "application_id", |row| row.get(0))
-        .map_err(|error| ApplicationError::storage("read_application_id", error))?;
+        .map_err(|error| inspect_error("read_application_id", error))?;
     let found_version: i32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|error| ApplicationError::storage("read_schema_version", error))?;
+        .map_err(|error| inspect_error("read_schema_version", error))?;
     let has_user_schema: bool = connection
         .query_row(
             "SELECT EXISTS(
@@ -44,7 +45,7 @@ pub(crate) fn open_database(
             [],
             |row| row.get(0),
         )
-        .map_err(|error| ApplicationError::storage("inspect_database_identity", error))?;
+        .map_err(|error| inspect_error("inspect_database_identity", error))?;
 
     if found_id != 0 && found_id != APPLICATION_ID {
         return Err(ApplicationError::DatabaseIdentity {
@@ -63,6 +64,19 @@ pub(crate) fn open_database(
             found: found_version,
             supported: SUPPORTED_SCHEMA_VERSION,
         });
+    }
+
+    // 异常退出或超过七天时检查；正常启动只读取身份、版本与健康检查时间。
+    let health_marker = data_directory.join("last-health-check");
+    let health_is_old = fs::metadata(&health_marker)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_none_or(|age| age.as_secs() >= 7 * 24 * 60 * 60);
+    if had_database && (data_directory.join("session-open").exists() || health_is_old) {
+        super::backup::check_health(&connection)?;
+        fs::write(&health_marker, b"ok")
+            .map_err(|error| ApplicationError::storage("record_health_check", error))?;
     }
 
     if found_version < SUPPORTED_SCHEMA_VERSION {
@@ -94,7 +108,23 @@ pub(crate) fn open_database(
              PRAGMA synchronous = NORMAL;",
         )
         .map_err(|error| ApplicationError::storage("configure_database", error))?;
+    fs::write(data_directory.join("session-open"), b"open")
+        .map_err(|error| ApplicationError::storage("record_open_session", error))?;
     Ok(connection)
+}
+
+/// 明确区分损坏与权限/磁盘错误，只有损坏才进入隔离恢复流程。
+pub(super) fn inspect_error(operation: &'static str, error: rusqlite::Error) -> ApplicationError {
+    if matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+    ) {
+        ApplicationError::DatabaseCorrupt {
+            message: error.to_string(),
+        }
+    } else {
+        ApplicationError::storage(operation, error)
+    }
 }
 
 fn create_migration_backup(

@@ -63,6 +63,11 @@
           Name="QuickNote.exe"
           KeyPath="yes"
           Checksum="yes" />
+        <!-- 每份安装都包含用户可以离线阅读的许可和隐私文本。 -->
+        <File Id="QuickNoteLicense" Source="LICENSE" Name="LICENSE.txt" />
+        <File Id="QuickNotePrivacy" Source="PRIVACY.md" Name="PRIVACY.txt" />
+        <File Id="QuickNoteNotices" Source="THIRD_PARTY_NOTICES.md" Name="THIRD_PARTY_NOTICES.txt" />
+        <File Id="QuickNoteSigningPolicy" Source="CODE_SIGNING_POLICY.md" Name="CODE_SIGNING_POLICY.txt" />
       </Component>
 
       <Component

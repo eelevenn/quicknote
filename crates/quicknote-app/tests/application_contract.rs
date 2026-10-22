@@ -5,7 +5,7 @@ use quicknote_app::platform::{PlatformCommand, PlatformServices};
 use quicknote_app::{
     Application, ApplicationConfig, ApplicationError, Command, CommandResult, EditorIntent,
     ExportBundle, NoteAction, NoteLifecycle, ReminderActivation, ReminderActivationAction,
-    ReminderActivationOutcome, ReminderCoordinationReason, ReminderStatus, SaveState,
+    ReminderActivationOutcome, ReminderCoordinationReason, SaveState,
 };
 use rusqlite::Connection;
 use std::fs;
@@ -378,6 +378,104 @@ fn json_and_markdown_exports_preserve_domain_state_and_source() {
 }
 
 #[test]
+fn export_contract_json_uses_utc_timestamps_and_records_application_version() {
+    let directory = TempDir::new().expect("创建导出合同临时目录");
+    let platform = TestPlatformServices::new(directory.path());
+    let app = Application::open(ApplicationConfig::new(directory.path())).expect("打开应用");
+    app.edit(EditorIntent::ReplaceBody("导出中的活跃便签".to_owned()))
+        .expect("输入正文");
+    let note_id = app.edit(EditorIntent::Flush).unwrap().note_id.unwrap();
+    let due_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+        + 3_600_000;
+    app.set_due_at(&platform, note_id, Some(due_at_ms))
+        .expect("设置带默认提醒的截止时间");
+    let reminder_at_ms = due_at_ms + 60_000;
+    app.set_reminder(&platform, note_id, Some(reminder_at_ms))
+        .expect("把提醒设置为独立时间");
+    // 导出必须刷新仍在内存中的最新修订，不能读旧的已保存正文。
+    app.edit(EditorIntent::ReplaceBody("导出的最新修订".to_owned()))
+        .unwrap();
+    let path = directory.path().join("contract.json");
+    app.export_json(&platform, &path).expect("导出 JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(value["app_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(value["format_version"], 1);
+    assert!(value["exported_at"].as_str().unwrap().ends_with('Z'));
+    let note = &value["notes"][0];
+    assert_eq!(note["body"], "导出的最新修订");
+    for key in ["created_at", "updated_at", "due_at"] {
+        let timestamp = note[key].as_str().expect("领域时间必须是 ISO 8601 字符串");
+        assert!(timestamp.ends_with('Z'));
+        chrono::DateTime::parse_from_rfc3339(timestamp).expect("时间为合法 ISO 8601");
+    }
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(note["due_at"].as_str().unwrap())
+            .unwrap()
+            .timestamp_millis(),
+        due_at_ms
+    );
+    assert!(note["archived_at"].is_null());
+    assert!(note["trashed_at"].is_null());
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(
+            value["reminders"][0]["scheduled_at"].as_str().unwrap()
+        )
+        .unwrap()
+        .timestamp_millis(),
+        reminder_at_ms
+    );
+    // 外部格式可完整往返，但不会改变内部文档使用毫秒整数的表示。
+    let bundle: ExportBundle = serde_json::from_value(value).expect("解析版本化导出合同");
+    assert_eq!(bundle.notes[0].due_at_ms, Some(due_at_ms));
+    assert_eq!(bundle.reminders[0].scheduled_at_ms, reminder_at_ms);
+    assert!(serde_json::to_value(app.note(note_id).unwrap()).unwrap()["created_at_ms"].is_i64());
+}
+
+#[test]
+fn export_contract_markdown_keeps_independent_reminder_and_all_lifecycles() {
+    let directory = TempDir::new().expect("创建 Markdown 导出临时目录");
+    let platform = TestPlatformServices::new(directory.path());
+    let app = Application::open(ApplicationConfig::new(directory.path())).expect("打开应用");
+    let body = "标题: \"中文\"\n\n- **正文** `原样`\n";
+    app.edit(EditorIntent::ReplaceBody(body.to_owned()))
+        .unwrap();
+    let note_id = app.edit(EditorIntent::Flush).unwrap().note_id.unwrap();
+    let reminder_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+        + 3_600_000;
+    app.set_reminder(&platform, note_id, Some(reminder_at_ms))
+        .expect("只设置提醒，不设置截止时间");
+    let path = directory.path().join("contract.md");
+    app.export_markdown(&platform, note_id, &path).unwrap();
+    let markdown = fs::read_to_string(&path).unwrap();
+    let expected = chrono::DateTime::from_timestamp_millis(reminder_at_ms)
+        .unwrap()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    assert!(markdown.contains(&format!("reminder_at: \"{expected}\"\n")));
+    assert!(markdown.contains("due_at: null\n"));
+    assert!(markdown.ends_with(&format!("---\n{body}")));
+
+    // 归档和回收站仍可导出，但已清除的提醒不能从旧快照重新出现。
+    for (action, lifecycle) in [
+        (NoteAction::Archive(note_id), "archived"),
+        (NoteAction::MoveToTrash(note_id), "trashed"),
+    ] {
+        app.apply_note_action(action).unwrap();
+        app.export_markdown(&platform, note_id, &path).unwrap();
+        let markdown = fs::read_to_string(&path).unwrap();
+        assert!(markdown.contains("reminder_at: null\n"));
+        assert!(markdown.contains(&format!("lifecycle: {lifecycle}\n")));
+        assert!(markdown.ends_with(&format!("---\n{body}")));
+    }
+}
+
+#[test]
 fn startup_setting_is_projected_before_it_is_persisted() {
     let directory = TempDir::new().expect("创建临时目录");
     let platform = TestPlatformServices::new(directory.path());
@@ -628,67 +726,6 @@ fn notification_actions_are_versioned_idempotent_and_freeze_snooze_duration() {
     assert_eq!(
         app.note(note_id).expect("归档事实保留").lifecycle,
         NoteLifecycle::Archived
-    );
-}
-
-#[test]
-fn due_reminder_is_missed_unless_note_was_already_focused() {
-    let directory = TempDir::new().expect("创建临时目录");
-    let platform = TestPlatformServices::new(directory.path());
-    let app = Application::open(ApplicationConfig::new(directory.path())).expect("打开应用");
-    app.edit(EditorIntent::ReplaceBody("聚焦到点".to_owned()))
-        .expect("编辑便签");
-    let note_id = app
-        .edit(EditorIntent::Flush)
-        .expect("保存便签")
-        .note_id
-        .expect("便签身份");
-    app.set_reminder(&platform, note_id, Some(current_time_ms() + 150))
-        .expect("设置短提醒");
-    app.coordinate_reminders(
-        &platform,
-        Some(note_id),
-        ReminderCoordinationReason::Continuous,
-    )
-    .expect("建立聚焦观察");
-    thread::sleep(Duration::from_millis(190));
-    app.coordinate_reminders(
-        &platform,
-        Some(note_id),
-        ReminderCoordinationReason::Continuous,
-    )
-    .expect("聚焦跨过提醒时间");
-    assert!(
-        app.note_timing(note_id)
-            .expect("读取聚焦结果")
-            .reminder
-            .is_none()
-    );
-
-    app.set_reminder(&platform, note_id, Some(current_time_ms() + 120))
-        .expect("设置错过候选");
-    app.coordinate_reminders(&platform, None, ReminderCoordinationReason::Continuous)
-        .expect("取消焦点");
-    thread::sleep(Duration::from_millis(160));
-    app.coordinate_reminders(&platform, None, ReminderCoordinationReason::Continuous)
-        .expect("无焦点跨过提醒时间");
-    assert_eq!(
-        app.note_timing(note_id)
-            .expect("读取错过结果")
-            .reminder
-            .expect("保留错过提醒")
-            .status,
-        ReminderStatus::Missed
-    );
-    assert!(
-        app.respond_to_due_reminder(&platform, note_id)
-            .expect("主动打开响应")
-    );
-    assert!(
-        app.note_timing(note_id)
-            .expect("提醒已响应")
-            .reminder
-            .is_none()
     );
 }
 

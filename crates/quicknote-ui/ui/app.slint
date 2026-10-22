@@ -1,4 +1,4 @@
-import { AboutSlint, Button, CheckBox, HorizontalBox, LineEdit, Palette, ScrollView, TextEdit, VerticalBox } from "std-widgets.slint";
+import { AboutSlint, Button, CheckBox, HorizontalBox, LineEdit, ListView, Palette, ScrollView, VerticalBox } from "std-widgets.slint";
 
 // 生命周期列表只接收应用模块提供的稳定摘要。
 export struct NoteListItem {
@@ -22,8 +22,10 @@ export struct PreviewLinkItem {
     url: string,
 }
 
-// 暴露 UTF-8 光标偏移，使录音结束时可以冻结真实插入位置。
+// 保留真实 UTF-8 光标与滚动位置，自动保存反馈不会打断编辑。
 component TrackedTextEdit inherits Rectangle {
+    min-height: 90px;
+    vertical-stretch: 1;
     in-out property <string> text;
     in property <string> placeholder-text;
     in property <length> font-size: 15px;
@@ -36,10 +38,11 @@ component TrackedTextEdit inherits Rectangle {
     border-color: Palette.border;
     border-width: 1px;
     border-radius: 4px;
-    accessible-role: AccessibleRole.text-input;
-    accessible-value: root.text;
+    in property <string> editor-label;
 
     editor-scroll := ScrollView {
+        viewport-x <=> root.viewport-x;
+        viewport-y <=> root.viewport-y;
         x: 7px;
         y: 7px;
         width: parent.width - 14px;
@@ -56,7 +59,10 @@ component TrackedTextEdit inherits Rectangle {
             font-size: root.font-size;
             color: Palette.foreground;
             page-height: editor-scroll.visible-height;
-            accessible-role: none;
+            accessible-role: AccessibleRole.text-input;
+            accessible-label: root.editor-label;
+            accessible-value: self.text;
+            accessible-description: "支持中文输入、粘贴和撤销重做";
             edited => { root.edited(self.text); }
             cursor-position-changed(cpos) => {
                 if (cpos.y + root.viewport-y < 0px) {
@@ -122,6 +128,8 @@ export component MainWindow inherits Window {
     in property <string> application-version: "0.1.0";
     in property <int> snooze-minutes: 10;
     in property <string> action-status;
+    in property <string> backup-status: "首次成功写入后自动备份";
+    in property <bool> backup-failed: false;
     in-out property <string> due-time-text;
     in-out property <string> reminder-time-text;
     in property <string> timing-status;
@@ -158,17 +166,39 @@ export component MainWindow inherits Window {
     callback export-markdown(string);
     callback open-quick-capture();
     callback exit-requested();
+    callback backup-requested();
+    callback open-data-directory();
+    callback open-notices();
+    // 宿主通过事件循环投递外部激活，界面不包含平台消息或线程类型。
+    callback external-activation();
 
     // 窗口管理器尺寸变化只更新状态，不把内容约束反向绑定到顶层宽度。
     changed width => { root.compact-mode = root.width < 720px; }
 
-    VerticalBox {
+    // 捕获应用级快捷键，普通输入及中文 IME 继续交给当前编辑器。
+    FocusScope {
+      capture-key-pressed(event) => {
+        if (event.modifiers.control && (event.text == "n" || event.text == "N")) {
+            root.new-note(); return accept;
+        }
+        if (event.modifiers.control && (event.text == "f" || event.text == "F")) {
+            search-input.focus(); return accept;
+        }
+        if (event.text == Key.Escape && root.confirm-action != 0) {
+            root.confirm-action = 0; return accept;
+        }
+        return reject;
+      }
+      VerticalBox {
         padding: 18px;
         spacing: 10px;
 
         HorizontalBox {
+            padding: 0px;
+            vertical-stretch: 0;
             spacing: 10px;
             VerticalBox {
+                padding: 0px;
                 spacing: 1px;
                 Text {
                     text: "QuickNote";
@@ -188,15 +218,21 @@ export component MainWindow inherits Window {
             Button { text: "快速记录"; clicked => { root.open-quick-capture(); } }
         }
 
-        HorizontalBox {
+        VerticalBox {
+            padding: 0px;
+            vertical-stretch: 0;
             spacing: 8px;
+          HorizontalBox {
+              padding: 0px;
             Button { text: "活跃 " + root.active-items.length; clicked => { if (root.navigate(0)) { root.section = 0; } } }
             Button { text: "归档 " + root.archived-items.length; clicked => { if (root.navigate(1)) { root.section = 1; } } }
             Button { text: "回收站 " + root.trash-items.length; clicked => { if (root.navigate(2)) { root.section = 2; } } }
             Button { text: "设置"; clicked => { if (root.navigate(3)) { root.section = 3; } } }
             Rectangle { horizontal-stretch: 1; }
-            LineEdit {
-                width: root.compact-mode ? 150px : 230px;
+          }
+          HorizontalBox {
+              padding: 0px;
+            search-input := LineEdit {
                 text <=> root.search-text;
                 placeholder-text: "搜索标题和完整正文";
                 accessible-label: "搜索活跃与归档便签";
@@ -206,9 +242,11 @@ export component MainWindow inherits Window {
                 text: "搜索";
                 clicked => { if (root.search-requested(root.search-text)) { root.section = 5; } }
             }
+          }
         }
 
         if root.section == 0 : HorizontalBox {
+        padding: 0px;
             spacing: 12px;
             vertical-stretch: 1;
 
@@ -234,8 +272,9 @@ export component MainWindow inherits Window {
                         text: "还没有已保存便签。按 Ctrl+N 新建。";
                         color: Palette.alternate-foreground;
                     }
-                    ScrollView {
+                    ListView {
                         for note in root.active-items : VerticalBox {
+        padding: 0px;
                             spacing: 2px;
                             Button {
                                 text: (note.is-current ? "● " : "") + (note.title == "" ? "无标题" : note.title);
@@ -263,6 +302,8 @@ export component MainWindow inherits Window {
                     padding: 14px;
                     spacing: 8px;
                     HorizontalBox {
+                        padding: 0px;
+                        vertical-stretch: 0;
                         Text {
                             text: root.editor-title == "" ? "空白草稿" : root.editor-title;
                             font-size: 20px;
@@ -283,8 +324,11 @@ export component MainWindow inherits Window {
                         }
                     }
                     if root.editor-note-id != "" : VerticalBox {
+        padding: 0px;
+                        vertical-stretch: 0;
                         spacing: 5px;
                         HorizontalBox {
+                            padding: 0px;
                             Text { text: "截止时间"; color: Palette.foreground; vertical-alignment: center; }
                             LineEdit {
                                 text <=> root.due-time-text;
@@ -296,6 +340,7 @@ export component MainWindow inherits Window {
                             Button { text: "清除"; clicked => { root.clear-due-time(); } }
                         }
                         HorizontalBox {
+                            padding: 0px;
                             Text { text: "提醒时间"; color: Palette.foreground; vertical-alignment: center; }
                             LineEdit {
                                 text <=> root.reminder-time-text;
@@ -310,7 +355,7 @@ export component MainWindow inherits Window {
                             text: root.timing-status;
                             visible: root.timing-status != "";
                             wrap: word-wrap;
-                            color: root.reminder-missed ? #c42b1c : (root.reminder-sync-pending ? #9a6700 : Palette.alternate-foreground);
+                            color: Palette.foreground;
                             accessible-label: root.timing-status;
                         }
                     }
@@ -320,7 +365,7 @@ export component MainWindow inherits Window {
                         text <=> root.editor-body;
                         font-size: 15px;
                         placeholder-text: "立即记录；标题从第一条非空行生成";
-                        accessible-label: "主页便签 Markdown 原文";
+                        editor-label: "主页便签 Markdown 原文";
                         edited(text) => { root.body-edited(text); }
                         changed cursor-byte-offset => { root.editor-cursor-byte-offset = self.cursor-byte-offset; }
                         changed focus-token => {
@@ -332,6 +377,7 @@ export component MainWindow inherits Window {
                     }
                     if root.preview-mode : ScrollView {
                         VerticalBox {
+                            padding: 0px;
                             spacing: 8px;
                             Text {
                                 text: root.preview-text == "" ? "没有可预览内容" : root.preview-text;
@@ -347,9 +393,11 @@ export component MainWindow inherits Window {
                         }
                     }
                     HorizontalBox {
+                        padding: 0px;
+                        vertical-stretch: 0;
                         Text {
                             text: root.save-status;
-                            color: root.save-failed ? #c42b1c : Palette.foreground;
+                            color: Palette.foreground;
                             accessible-label: root.save-status;
                         }
                         Rectangle { horizontal-stretch: 1; }
@@ -365,10 +413,12 @@ export component MainWindow inherits Window {
 
         if root.section == 1 : ScrollView {
             VerticalBox {
+                padding: 0px;
                 spacing: 8px;
                 Text { text: "归档便签只读；取消归档不会抢占已有当前便签。"; color: Palette.alternate-foreground; }
                 Text { visible: root.archived-items.length == 0; text: "归档为空"; color: Palette.alternate-foreground; }
                 for note in root.archived-items : HorizontalBox {
+        padding: 0px;
                     Button { text: note.title == "" ? "无标题" : note.title; clicked => { root.open-readonly(note.id); } }
                     Text { text: note.metadata; color: Palette.alternate-foreground; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
@@ -387,10 +437,12 @@ export component MainWindow inherits Window {
 
         if root.section == 2 : ScrollView {
             VerticalBox {
+                padding: 0px;
                 spacing: 8px;
                 Text { text: "回收站保留绝对 30×24 小时；恢复只回到归档。"; color: Palette.alternate-foreground; }
                 Text { visible: root.trash-items.length == 0; text: "回收站为空"; color: Palette.alternate-foreground; }
                 for note in root.trash-items : HorizontalBox {
+        padding: 0px;
                     Button { text: note.title == "" ? "无标题" : note.title; clicked => { root.open-readonly(note.id); } }
                     Text { text: note.metadata; color: Palette.alternate-foreground; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
@@ -408,12 +460,16 @@ export component MainWindow inherits Window {
         }
 
         if root.section == 3 : ScrollView {
+            vertical-stretch: 1;
             VerticalBox {
+                padding: 0px;
                 spacing: 12px;
                 Text { text: "设置"; font-size: 21px; font-weight: 650; color: Palette.foreground; }
                 Text { text: "跟随 Windows 系统主题"; color: Palette.alternate-foreground; }
                 HorizontalBox {
+                    padding: 0px;
                     VerticalBox {
+                        padding: 0px;
                         Text { text: "全局快捷键"; color: Palette.foreground; }
                         LineEdit { text <=> root.shortcut-text; accessible-label: "全局快捷键组合"; accepted => { root.apply-shortcut(root.shortcut-text); } }
                     }
@@ -426,6 +482,7 @@ export component MainWindow inherits Window {
                     toggled => { root.startup-changed(self.checked); }
                 }
                 HorizontalBox {
+                    padding: 0px;
                     Text { text: "默认稍后提醒：" + root.snooze-minutes + " 分钟"; color: Palette.foreground; vertical-alignment: center; }
                     Button { text: "5"; clicked => { root.snooze-changed(5); } }
                     Button { text: "10"; clicked => { root.snooze-changed(10); } }
@@ -434,12 +491,20 @@ export component MainWindow inherits Window {
                     Button { text: "60"; clicked => { root.snooze-changed(60); } }
                 }
                 HorizontalBox {
+                    padding: 0px;
                     Button { text: "导出完整 JSON"; clicked => { root.export-json(); } }
                     Button {
                         enabled: root.editor-note-id != "";
                         text: "导出当前 Markdown";
                         clicked => { root.export-markdown(root.editor-note-id); }
                     }
+                }
+                Text { text: root.backup-status; wrap: word-wrap; color: Palette.foreground; accessible-label: self.text; }
+                HorizontalBox {
+                    padding: 0px;
+                    Button { text: root.backup-failed ? "重试备份" : "立即备份"; clicked => { root.backup-requested(); } }
+                    Button { text: "打开数据目录"; clicked => { root.open-data-directory(); } }
+                    Button { text: "第三方许可证"; clicked => { root.open-notices(); } }
                 }
                 Text { text: root.action-status; wrap: word-wrap; color: Palette.alternate-foreground; accessible-label: root.action-status; }
                 Text {
@@ -461,9 +526,11 @@ export component MainWindow inherits Window {
                 padding: 14px;
                 spacing: 8px;
                 HorizontalBox {
+                    padding: 0px;
                     Text { text: root.readonly-title == "" ? "无标题" : root.readonly-title; font-size: 20px; font-weight: 650; color: Palette.foreground; }
                     Rectangle { horizontal-stretch: 1; }
                     Text { text: root.readonly-lifecycle; color: Palette.alternate-foreground; vertical-alignment: center; }
+                    Button { text: "导出 Markdown"; clicked => { root.export-markdown(root.readonly-note-id); } }
                     Button { text: "返回"; clicked => { root.section = root.readonly-lifecycle == "归档" ? 1 : 2; } }
                 }
                 Text { visible: root.readonly-timing != ""; text: root.readonly-timing; color: Palette.alternate-foreground; accessible-label: root.readonly-timing; }
@@ -473,10 +540,12 @@ export component MainWindow inherits Window {
 
         if root.section == 5 : ScrollView {
             VerticalBox {
+                padding: 0px;
                 spacing: 8px;
                 Text { text: "搜索结果"; font-size: 20px; font-weight: 650; color: Palette.foreground; }
                 Text { visible: root.search-items.length == 0; text: root.search-text == "" ? "输入文字开始搜索" : "没有匹配便签"; color: Palette.alternate-foreground; }
                 for result in root.search-items : HorizontalBox {
+        padding: 0px;
                     Button { text: result.title == "" ? "无标题" : result.title; clicked => { root.search-result-opened(result.id); } }
                     Text { text: result.lifecycle + " · " + result.detail; color: Palette.alternate-foreground; vertical-alignment: center; }
                 }
@@ -486,7 +555,7 @@ export component MainWindow inherits Window {
         if root.confirm-action != 0 : Rectangle {
             height: 62px;
             background: Palette.alternate-background;
-            border-color: #c42b1c;
+            border-color: Palette.border;
             border-width: 1px;
             border-radius: 6px;
             HorizontalBox {
@@ -513,10 +582,13 @@ export component MainWindow inherits Window {
         }
 
         HorizontalBox {
+            padding: 0px;
+            vertical-stretch: 0;
             Text { text: root.action-status; color: Palette.alternate-foreground; overflow: elide; }
             Rectangle { horizontal-stretch: 1; }
             Button { text: "退出"; clicked => { root.exit-requested(); } }
         }
+    }
     }
 
     public function focus-editor-at(offset: int) {
@@ -528,8 +600,10 @@ export component MainWindow inherits Window {
 // 快速记录始终编辑 Markdown 原文，不承载预览或生命周期管理。
 export component QuickCaptureWindow inherits Window {
     title: "QuickNote · 快速记录";
-    width: 540px;
-    height: 320px;
+    preferred-width: 540px;
+    preferred-height: 320px;
+    min-width: 380px;
+    min-height: 240px;
     background: Palette.background;
 
     in-out property <string> editor-body;
@@ -546,7 +620,13 @@ export component QuickCaptureWindow inherits Window {
     callback dismissed();
     callback open-main();
 
-    VerticalBox {
+    // Esc 经过应用层刷新，保存失败时保留窗口和内存正文。
+    FocusScope {
+      capture-key-pressed(event) => {
+        if (event.text == Key.Escape) { root.dismissed(); return accept; }
+        return reject;
+      }
+      VerticalBox {
         padding: 20px;
         spacing: 10px;
         Text {
@@ -561,28 +641,78 @@ export component QuickCaptureWindow inherits Window {
             text <=> root.editor-body;
             font-size: 15px;
             placeholder-text: "输入 Markdown 原文后自动保存";
-            accessible-label: "快速记录正文";
-            accessible-description: "支持中文输入、粘贴和撤销重做";
+            editor-label: "快速记录正文";
             edited(text) => { root.body-edited(text); }
             changed cursor-byte-offset => { root.editor-cursor-byte-offset = self.cursor-byte-offset; }
         }
         Text {
             visible: root.reminder-status != "";
             text: root.reminder-status;
-            color: root.reminder-missed ? #c42b1c : Palette.alternate-foreground;
+            color: Palette.foreground;
             accessible-label: root.reminder-status;
         }
         HorizontalBox {
-            Text { text: root.save-status; color: root.save-failed ? #c42b1c : Palette.foreground; accessible-label: root.save-status; }
+            padding: 0px;
+            Text { text: root.save-status; color: Palette.foreground; accessible-label: root.save-status; }
             Rectangle { horizontal-stretch: 1; }
             Button { visible: root.save-failed; text: "重试"; clicked => { root.retry-save(); } }
             Button { text: "主页"; clicked => { root.open-main(); } }
             Button { text: "关闭"; clicked => { root.dismissed(); } }
         }
     }
+    }
 
     public function focus-editor-at(offset: int) {
         capture-editor.focus-editor();
         capture-editor.set-selection-offsets(offset, offset);
+    }
+}
+
+// 恢复页只在数据库无法安全打开时显示；空库必须再次确认。
+export component RecoveryWindow inherits Window {
+    title: "QuickNote · 数据恢复";
+    preferred-width: 650px;
+    preferred-height: 460px;
+    min-width: 420px;
+    min-height: 350px;
+    background: Palette.background;
+    in property <string> detail;
+    in property <[string]> backups;
+    in property <bool> recovery-enabled: false;
+    in-out property <bool> confirm-empty: false;
+    callback restore(int);
+    callback create-empty();
+    callback open-directory();
+    callback quit();
+    VerticalBox {
+        padding: 20px;
+        spacing: 12px;
+        Text { text: "需要恢复本地数据"; font-size: 23px; font-weight: 700; color: Palette.foreground; }
+        ScrollView { Text { text: root.detail; wrap: word-wrap; color: Palette.foreground; } }
+        if root.recovery-enabled : ListView {
+            for backup[index] in root.backups : Button {
+                text: (index == 0 ? "恢复最近备份：" : "恢复备份：") + backup;
+                clicked => { root.restore(index); }
+            }
+        }
+        Text {
+            visible: root.recovery-enabled && root.backups.length == 0;
+            text: "没有找到有效备份。原始故障文件已保留，可打开数据目录检查。";
+            wrap: word-wrap;
+            color: Palette.foreground;
+        }
+        if root.confirm-empty : HorizontalBox {
+        padding: 0px;
+            Text { text: "确认开始空库？原故障副本仍保留。"; wrap: word-wrap; color: Palette.foreground; }
+            Button { text: "确认新建空库"; clicked => { root.create-empty(); } }
+            Button { text: "取消"; clicked => { root.confirm-empty = false; } }
+        }
+        HorizontalBox {
+            padding: 0px;
+            Button { text: "打开数据目录"; clicked => { root.open-directory(); } }
+            Button { text: "新建空库"; enabled: root.recovery-enabled; clicked => { root.confirm-empty = true; } }
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "退出"; clicked => { root.quit(); } }
+        }
     }
 }

@@ -3,13 +3,15 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod tray;
+#[cfg(windows)]
 mod windows_platform;
 
 #[cfg(windows)]
 use chrono::{Local, LocalResult, NaiveDateTime, TimeZone};
 #[cfg(windows)]
 use quicknote_app::platform::{
-    ActivationRequest, InstanceRole, PRODUCT_IDENTITY, PlatformServices,
+    ActivationRequest, InstanceRole, PRODUCT_IDENTITY, PlatformCommand, PlatformServices,
     activation_from_protocol_uri,
 };
 #[cfg(windows)]
@@ -39,7 +41,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic, Set
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use std::sync::{Arc, mpsc};
+    use std::sync::{Arc, OnceLock, mpsc};
     use std::time::Duration;
     use windows_platform::WindowsPlatformServices;
 
@@ -55,10 +57,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     platform.configure_process_identity()?;
     let initial_activation = activation_from_arguments();
     let (activation_sender, activation_receiver) = mpsc::channel();
+    let activation_window = Arc::new(OnceLock::<slint::Weak<MainWindow>>::new());
+    let activation_target = Arc::clone(&activation_window);
     let instance_role = platform.acquire_single_instance(
         initial_activation.clone(),
         Arc::new(move |activation| {
             let _ = activation_sender.send(activation);
+            // 热键/托盘/次实例到达时立即唤醒 UI，避免多等一个 50 ms 轮询周期。
+            if let Some(window) = activation_target.get() {
+                let _ = window.upgrade_in_event_loop(|main| {
+                    // Windows UIA 会重入原生消息栈；零延时任务待本轮读取结束再改变焦点。
+                    let target = main.as_weak();
+                    Timer::single_shot(Duration::ZERO, move || {
+                        if let Some(main) = target.upgrade() {
+                            main.invoke_external_activation();
+                        }
+                    });
+                });
+            }
         }),
     )?;
     let _instance_lease = match instance_role {
@@ -67,11 +83,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 只有主实例会打开 SQLite、启动自动保存协调器和创建窗口。
-    let application = Rc::new(Application::open(ApplicationConfig::new(
-        platform.data_directory()?,
-    ))?);
+    let config = ApplicationConfig::new(platform.data_directory()?);
+    let Some(application) = open_with_recovery(&config)? else {
+        return Ok(());
+    };
+    let application = Rc::new(application);
     let main_window = MainWindow::new()?;
     let quick_capture = QuickCaptureWindow::new()?;
+    // 创建原生句柄前显式给出首次尺寸，避免恢复/最小化调用将窗口锁在最小尺寸。
+    main_window
+        .window()
+        .set_size(slint::LogicalSize::new(940.0, 650.0));
+    quick_capture
+        .window()
+        .set_size(slint::LogicalSize::new(540.0, 320.0));
     main_window.set_application_version(SharedString::from(env!("CARGO_PKG_VERSION")));
     let initial_editor = application.editing_snapshot()?;
     set_editor_document(&main_window, &quick_capture, &initial_editor);
@@ -104,6 +129,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Rc::clone(&application),
         platform.clone(),
     );
+    let activation_main = main_window.as_weak();
+    let activation_capture = quick_capture.as_weak();
+    let activation_application = Rc::clone(&application);
+    let activation_platform = platform.clone();
+    main_window.on_external_activation(move || {
+        let (Some(main), Some(capture)) = (activation_main.upgrade(), activation_capture.upgrade())
+        else {
+            return;
+        };
+        while let Ok(activation) = activation_receiver.try_recv() {
+            route_activation(
+                &main,
+                &capture,
+                &activation_application,
+                &activation_platform,
+                activation,
+            );
+        }
+    });
+    let _ = activation_window.set(main_window.as_weak());
+    // 关闭窗口后仍需保留可发现的入口；托盘动作通过同一个激活队列路由。
+    if let Err(error) = platform.apply(PlatformCommand::SetTrayVisible { visible: true }) {
+        main_window.set_action_status(SharedString::from(format!("托盘暂不可用：{error}")));
+    }
     route_activation(
         &main_window,
         &quick_capture,
@@ -111,8 +160,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &platform,
         initial_activation,
     );
+    // 窗口建立前收到的激活仍在队列里，首次进入事件循环前先处理一次。
+    main_window.invoke_external_activation();
 
-    let activation_timer = Timer::default();
+    let feedback_timer = Timer::default();
     let main_weak = main_window.as_weak();
     let capture_weak = quick_capture.as_weak();
     let timer_application = Rc::clone(&application);
@@ -123,19 +174,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let timer_platform = platform.clone();
     let last_timing = Rc::new(RefCell::new(None::<NoteTiming>));
     let timing_cache = Rc::clone(&last_timing);
-    activation_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
+    let mut capture_was_focused = false;
+    feedback_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
         let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) else {
             return;
         };
-        while let Ok(activation) = activation_receiver.try_recv() {
-            route_activation(
-                &main,
-                &capture,
-                &timer_application,
-                &timer_platform,
-                activation,
-            );
+        // 点击其他应用时结束快速记录；未成功保存时仍保留正文和窗口。
+        let capture_focused = capture.window().is_visible()
+            && window_hwnd(capture.window())
+                .is_some_and(|hwnd| hwnd == unsafe { GetForegroundWindow() });
+        if capture_was_focused && !capture_focused && capture.window().is_visible() {
+            capture.invoke_dismissed();
         }
+        capture_was_focused = capture_focused;
         // 只同步保存反馈和摘要，不重设可见 TextEdit 的正文或选择范围。
         if let Ok(snapshot) = timer_application.editing_snapshot() {
             let mut cached = timer_snapshot_cache.borrow_mut();
@@ -149,6 +200,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .duration_since(*reminder_tick.borrow())
             .unwrap_or_default();
         if elapsed >= Duration::from_millis(250) {
+            if let Ok(status) = timer_application.backup_status() {
+                sync_backup_status(&main, status);
+            }
             let reason = if elapsed >= Duration::from_secs(5) {
                 ReminderCoordinationReason::Resume
             } else {
@@ -283,6 +337,8 @@ fn wire_editor_callbacks(
         if let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) {
             match application_for_new.edit(EditorIntent::NewBlankDraft) {
                 Ok(snapshot) => {
+                    main.set_section(0);
+                    main.set_preview_mode(false);
                     set_editor_document(&main, &capture, &snapshot);
                     clear_timing_view(&main, &capture);
                     if main.get_compact_mode() {
@@ -593,6 +649,47 @@ fn wire_settings_callbacks(
     platform: windows_platform::WindowsPlatformServices,
 ) {
     let app = Rc::clone(&application);
+    let main_weak = main.as_weak();
+    main.on_backup_requested(move || {
+        if let Some(main) = main_weak.upgrade() {
+            match app.create_backup() {
+                Ok(status) => sync_backup_status(&main, status),
+                Err(error) => {
+                    main.set_action_status(SharedString::from(format!("备份失败：{error}")))
+                }
+            }
+        }
+    });
+    let data_platform = platform.clone();
+    let main_weak = main.as_weak();
+    main.on_open_data_directory(move || {
+        if let Err(error) = data_platform
+            .data_directory()
+            .and_then(|path| windows_platform::open_local_path(&path))
+            && let Some(main) = main_weak.upgrade()
+        {
+            main.set_action_status(error.to_string().into());
+        }
+    });
+    let notices_platform = platform.clone();
+    let main_weak = main.as_weak();
+    main.on_open_notices(move || {
+        // 文本随二进制内嵌，便携运行时也能查看相同许可证。
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let path = notices_platform
+                .data_directory()?
+                .join("THIRD_PARTY_NOTICES.txt");
+            std::fs::write(&path, include_str!("../../../THIRD_PARTY_NOTICES.md"))?;
+            windows_platform::open_local_path(&path)?;
+            Ok(())
+        })();
+        if let Err(error) = result
+            && let Some(main) = main_weak.upgrade()
+        {
+            main.set_action_status(error.to_string().into());
+        }
+    });
+    let app = Rc::clone(&application);
     let startup_platform = platform.clone();
     let main_weak = main.as_weak();
     main.on_startup_changed(move |enabled| {
@@ -643,8 +740,13 @@ fn wire_settings_callbacks(
         let Some(main) = main_weak.upgrade() else {
             return;
         };
-        let target = match export_platform.data_directory() {
-            Ok(directory) => directory.join("exports").join("quicknote.json"),
+        let target = match windows_platform::choose_export_path(
+            window_hwnd(main.window()),
+            "quicknote.json",
+            true,
+        ) {
+            Ok(Some(path)) => path,
+            Ok(None) => return,
             Err(error) => {
                 main.set_action_status(SharedString::from(format!("导出目录不可用：{error}")));
                 return;
@@ -669,26 +771,156 @@ fn wire_settings_callbacks(
             return;
         };
         let result = parse_note_action_id(id.as_str()).and_then(|note_id| {
-            let directory = export_platform.data_directory().map_err(|error| {
-                quicknote_app::ApplicationError::Platform {
-                    operation: error.operation,
-                    message: error.message,
-                }
+            // 先刷新最新标题，再按安全标题和短 UUID 提供默认文件名。
+            app.edit(EditorIntent::Flush)?;
+            let suggested_name = app.note(note_id)?.markdown_file_name();
+            let target = windows_platform::choose_export_path(
+                window_hwnd(main.window()),
+                &suggested_name,
+                false,
+            )
+            .map_err(|error| quicknote_app::ApplicationError::Platform {
+                operation: error.operation,
+                message: error.message,
             })?;
-            let target = directory.join("exports").join(format!("{note_id}.md"));
+            let Some(target) = target else {
+                return Ok(None);
+            };
             app.export_markdown(&export_platform, note_id, &target)?;
-            Ok(target)
+            Ok(Some(target))
         });
         match result {
-            Ok(target) => main.set_action_status(SharedString::from(format!(
+            Ok(Some(target)) => main.set_action_status(SharedString::from(format!(
                 "Markdown 已原子导出到 {}",
                 target.display()
             ))),
+            Ok(None) => {}
             Err(error) => {
                 main.set_action_status(SharedString::from(format!("Markdown 导出失败：{error}")))
             }
         }
     });
+}
+
+/// 备份警告不冒充正文保存失败，用户可在设置中单独重试。
+#[cfg(windows)]
+fn sync_backup_status(main: &MainWindow, status: quicknote_app::BackupStatus) {
+    main.set_backup_failed(status.warning.is_some());
+    main.set_backup_status(SharedString::from(status.warning.unwrap_or_else(|| {
+        status
+            .last_success_at_ms
+            .map(|time| format!("最近自动备份：{}", format_local_time(time)))
+            .unwrap_or_else(|| {
+                "每个自然日首次写入后自动备份；保留最近 7 天与 4 周，最多 30 天".into()
+            })
+    })));
+}
+
+/// 数据损坏时显示可操作的恢复页；未来 schema 和权限错误仅展示诊断。
+#[cfg(windows)]
+fn open_with_recovery(
+    config: &ApplicationConfig,
+) -> Result<Option<Application>, Box<dyn std::error::Error>> {
+    use quicknote_app::{ApplicationError, RecoverySession};
+    use quicknote_ui::RecoveryWindow;
+    use std::cell::Cell;
+
+    loop {
+        let error = match Application::open(config.clone()) {
+            Ok(application) => return Ok(Some(application)),
+            Err(error) => error,
+        };
+        let window = RecoveryWindow::new()?;
+        let mut detail = error.to_string();
+        let recovery = if matches!(
+            error,
+            ApplicationError::DatabaseCorrupt { .. } | ApplicationError::RecoveryRequired
+        ) {
+            match RecoverySession::prepare(config) {
+                Ok(session) => {
+                    detail.push_str(&format!(
+                        "\n原始故障文件保留在：{}\n恢复整份备份后会重新检查数据和提醒。",
+                        session.quarantine_directory.display()
+                    ));
+                    Some(Rc::new(session))
+                }
+                Err(error) => {
+                    detail.push_str(&format!("\n无法安全隔离文件：{error}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        window.set_detail(detail.into());
+        window.set_recovery_enabled(recovery.is_some());
+        let retry = Rc::new(Cell::new(false));
+        if let Some(session) = recovery {
+            let labels = session
+                .backups
+                .iter()
+                .map(|backup| SharedString::from(format_local_time(backup.created_at_ms)))
+                .collect::<Vec<_>>();
+            window.set_backups(ModelRc::new(VecModel::from(labels)));
+            let recovery = Rc::clone(&session);
+            let again = Rc::clone(&retry);
+            let weak = window.as_weak();
+            window.on_restore(move |index| {
+                let Some(backup) = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| recovery.backups.get(index))
+                else {
+                    return;
+                };
+                match recovery.restore(&backup.path) {
+                    Ok(()) => {
+                        again.set(true);
+                        let _ = slint::quit_event_loop();
+                    }
+                    Err(error) => {
+                        if let Some(window) = weak.upgrade() {
+                            window.set_detail(format!("恢复失败，故障副本仍保留：{error}").into());
+                        }
+                    }
+                }
+            });
+            let again = Rc::clone(&retry);
+            let weak = window.as_weak();
+            window.on_create_empty(move || match session.create_empty() {
+                Ok(()) => {
+                    again.set(true);
+                    let _ = slint::quit_event_loop();
+                }
+                Err(error) => {
+                    if let Some(window) = weak.upgrade() {
+                        window.set_detail(error.to_string().into());
+                    }
+                }
+            });
+        }
+        let directory = config.data_directory().to_path_buf();
+        let weak = window.as_weak();
+        window.on_open_directory(move || {
+            if let Err(error) = windows_platform::open_local_path(&directory)
+                && let Some(window) = weak.upgrade()
+            {
+                window.set_detail(error.to_string().into());
+            }
+        });
+        window.on_quit(|| {
+            let _ = slint::quit_event_loop();
+        });
+        window.window().on_close_requested(|| {
+            let _ = slint::quit_event_loop();
+            CloseRequestResponse::HideWindow
+        });
+        window.show()?;
+        slint::run_event_loop_until_quit()?;
+        window.hide()?;
+        if !retry.get() {
+            return Ok(None);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -829,8 +1061,9 @@ fn wire_window_lifecycle(
             return CloseRequestResponse::HideWindow;
         };
         match application_for_main_close.edit(EditorIntent::Flush) {
-            Ok(_) => {
-                let _ = slint::quit_event_loop();
+            Ok(snapshot) => {
+                // 关闭主页只隐藏窗口；显式退出才停止托盘和快捷键。
+                sync_editor_status(&main, &capture, &snapshot);
                 CloseRequestResponse::HideWindow
             }
             Err(error) => {
@@ -869,6 +1102,7 @@ fn route_activation(
     activation: ActivationRequest,
 ) {
     match activation {
+        ActivationRequest::ExitRequested => request_exit(main, capture, application),
         ActivationRequest::BackgroundStartup => {
             // 登录启动只保持全局快捷键和提醒协调器运行。
             let _ = main.hide();
@@ -995,6 +1229,8 @@ fn show_quick_capture_snapshot(
 
 #[cfg(windows)]
 fn show_main_window(main: &MainWindow, capture: &QuickCaptureWindow, snapshot: &EditingSnapshot) {
+    main.set_section(0);
+    main.set_preview_mode(false);
     set_editor_document(main, capture, snapshot);
     let _ = capture.hide();
     main.window().set_minimized(false);

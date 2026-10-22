@@ -4,6 +4,15 @@ use thiserror::Error;
 /// 应用模块向 UI 和测试公开的稳定错误分类。
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ApplicationError {
+    /// SQLite 页或外键检查失败，必须先保留故障副本再恢复。
+    #[error("数据库损坏，需要恢复：{message}")]
+    DatabaseCorrupt {
+        /// 可供恢复界面显示的诊断信息。
+        message: String,
+    },
+    /// 上次已经隔离故障库，但用户尚未选择恢复或新建。
+    #[error("上次数据库恢复尚未完成，请选择备份或明确新建空库")]
+    RecoveryRequired,
     /// 调用方提交了不满足领域规则的命令。
     #[error("命令无效：{message}")]
     InvalidCommand {
