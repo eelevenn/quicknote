@@ -6,6 +6,7 @@
 
 mod editing;
 mod error;
+mod export;
 mod interface;
 mod markdown;
 pub mod platform;
@@ -14,9 +15,9 @@ mod storage;
 pub use error::ApplicationError;
 pub use interface::{
     ApplicationConfig, ApplicationSnapshot, Command, CommandResult, EditingSnapshot, EditorIntent,
-    ExportBundle, ExportReminder, ExportSettings, LibrarySnapshot, MarkdownLink, MarkdownPreview,
-    NoteAction, NoteDocument, NoteLifecycle, NoteSummary, NoteTiming, ReminderActivation,
-    ReminderActivationAction, ReminderActivationOutcome, ReminderCoordination,
+    ExportBundle, ExportNote, ExportReminder, ExportSettings, LibrarySnapshot, MarkdownLink,
+    MarkdownPreview, NoteAction, NoteDocument, NoteLifecycle, NoteSummary, NoteTiming,
+    ReminderActivation, ReminderActivationAction, ReminderActivationOutcome, ReminderCoordination,
     ReminderCoordinationReason, ReminderSnapshot, ReminderStatus, SaveState, SchemaIdentity,
     SearchResult,
 };
@@ -152,7 +153,17 @@ impl Application {
         focused_note_id: Option<Uuid>,
         reason: ReminderCoordinationReason,
     ) -> Result<ReminderCoordination, ApplicationError> {
-        let timestamp = now_ms();
+        self.coordinate_reminders_at(platform, focused_note_id, reason, now_ms())
+    }
+
+    /// 一次协调固定一个观察时刻；测试可跨过截止点而不依赖线程调度或短 sleep。
+    fn coordinate_reminders_at(
+        &self,
+        platform: &dyn PlatformServices,
+        focused_note_id: Option<Uuid>,
+        reason: ReminderCoordinationReason,
+        timestamp: i64,
+    ) -> Result<ReminderCoordination, ApplicationError> {
         let (focused_since_ms, should_reconcile) = {
             let mut state = self.reminder_focus.lock().map_err(|error| {
                 ApplicationError::WriterUnavailable {
@@ -183,7 +194,7 @@ impl Application {
             focused_since_ms,
             reason != ReminderCoordinationReason::Continuous,
         )?;
-        self.project_reminder_outbox(platform, should_reconcile)
+        self.project_reminder_outbox_at(platform, should_reconcile, timestamp)
     }
 
     /// 搜索活跃和归档正文，使用大小写不敏感的文字子串合同。
@@ -213,6 +224,7 @@ impl Application {
 
     /// 立即执行一次 30 天回收站维护；后台单写者也会每 24 小时执行。
     pub fn maintain_trash(&self) -> Result<u64, ApplicationError> {
+        self.editor.apply(EditorIntent::Flush)?;
         let deleted = self.storage.maintain_trash()?;
         self.editor.apply(EditorIntent::OpenCurrent)?;
         Ok(deleted)
@@ -247,8 +259,8 @@ impl Application {
         target: &Path,
     ) -> Result<(), ApplicationError> {
         self.editor.apply(EditorIntent::Flush)?;
-        let note = self.storage.read_note(note_id)?;
-        let bytes = markdown::markdown_export(&note);
+        let (note, reminder_at_ms) = self.storage.export_note(note_id)?;
+        let bytes = markdown::markdown_export(&note, reminder_at_ms)?;
         platform
             .write_file_atomically(target, bytes.as_bytes())
             .map_err(ApplicationError::platform)
@@ -356,8 +368,8 @@ impl Application {
         let connection = storage::open_database(&config, migration_fault)?;
         let writer = StorageWriter::start(connection, storage_faults)?;
         let storage = writer.client();
-        // 启动时先清理绝对保留期已满的回收站便签，再建立编辑视图。
-        storage.maintain_trash()?;
+        // 备份暂时被占用时保留到期便签并报告维护警告，不阻断健康库启动。
+        let _ = storage.maintain_trash();
         let editor = editing::Editor::start(storage.clone())?;
         Ok(Self {
             editor,
@@ -372,7 +384,16 @@ impl Application {
         platform: &dyn PlatformServices,
         reconcile: bool,
     ) -> Result<ReminderCoordination, ApplicationError> {
-        let timestamp = now_ms();
+        self.project_reminder_outbox_at(platform, reconcile, now_ms())
+    }
+
+    /// 投影和到期判断共享观察时刻，避免同一轮协调混入两次系统时间读取。
+    fn project_reminder_outbox_at(
+        &self,
+        platform: &dyn PlatformServices,
+        reconcile: bool,
+        timestamp: i64,
+    ) -> Result<ReminderCoordination, ApplicationError> {
         let mut platform_error = None;
         if reconcile {
             match platform.scheduled_notifications() {
@@ -446,6 +467,68 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
+
+    #[test]
+    fn due_reminder_uses_observed_focus_and_never_replays_after_resume() {
+        use crate::{ReminderCoordinationReason, ReminderStatus};
+
+        // 所有组合共享固定领域时间；磁盘备份再慢也不会错过建焦点的窗口。
+        for (focused_before, focused_after, reason, should_respond) in [
+            (true, true, ReminderCoordinationReason::Continuous, true),
+            (false, false, ReminderCoordinationReason::Continuous, false),
+            (false, true, ReminderCoordinationReason::Continuous, false),
+            (true, true, ReminderCoordinationReason::Resume, false),
+        ] {
+            let directory = TempDir::new().unwrap();
+            let platform = TestPlatformServices::new(directory.path());
+            let app = Application::open(ApplicationConfig::new(directory.path())).unwrap();
+            app.edit(EditorIntent::ReplaceBody("聚焦观察合同".to_owned()))
+                .unwrap();
+            let note_id = app.edit(EditorIntent::Flush).unwrap().note_id.unwrap();
+            let observed_at = 1_700_000_000_000;
+            app.storage
+                .set_reminder(note_id, Some(observed_at + 1_000), observed_at)
+                .unwrap();
+            app.coordinate_reminders_at(
+                &platform,
+                focused_before.then_some(note_id),
+                ReminderCoordinationReason::Continuous,
+                observed_at,
+            )
+            .unwrap();
+            app.coordinate_reminders_at(
+                &platform,
+                focused_after.then_some(note_id),
+                reason,
+                observed_at + 1_001,
+            )
+            .unwrap();
+
+            let reminder = app.note_timing(note_id).unwrap().reminder;
+            if should_respond {
+                assert!(reminder.is_none(), "持续聚焦跨过到点时刻应响应提醒");
+            } else {
+                assert_eq!(reminder.unwrap().status, ReminderStatus::Missed);
+                // 主动打开是独立动作，可以响应错过状态；仅把窗口带回前台不可以。
+                assert!(
+                    app.storage
+                        .respond_to_due_reminder(note_id, observed_at + 2_000)
+                        .unwrap()
+                );
+                assert!(app.note_timing(note_id).unwrap().reminder.is_none());
+            }
+            assert_eq!(
+                platform
+                    .recorded_commands()
+                    .unwrap()
+                    .iter()
+                    .filter(|command| matches!(command, PlatformCommand::UpsertNotification { .. }))
+                    .count(),
+                1,
+                "跨过提醒或系统恢复后不能补发通知"
+            );
+        }
+    }
 
     #[test]
     fn future_schema_is_rejected_without_modification() {

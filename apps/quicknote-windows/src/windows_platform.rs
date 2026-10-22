@@ -570,6 +570,18 @@ impl WindowsPlatformServices {
                 .RemoveFromSchedule(&item)
                 .map_err(|error| PlatformError::new("cancel_notification", error.to_string()))?;
         }
+        // 已投递的通知不在计划列表中；精确移除这个版本的历史，保留后续触发版本。
+        ToastNotificationManager::History()
+            .and_then(|history| {
+                history.RemoveGroupedTagWithId(
+                    &HSTRING::from(tag),
+                    &HSTRING::from(group),
+                    &HSTRING::from(PRODUCT_IDENTITY.aumid),
+                )
+            })
+            .map_err(|error| {
+                PlatformError::new("cancel_notification_history", error.to_string())
+            })?;
         Ok(())
     }
 
@@ -1337,11 +1349,20 @@ mod tests {
         platform
             .configure_process_identity()
             .expect("注册桌面通知身份");
-        let reminder_id =
-            uuid::Uuid::parse_str("019c20aa-bbcc-7def-8123-456789abcdef").expect("解析验收 UUID");
+        // 每次验收只清理自己产生的随机通知，避免与旧测试或真实用户数据重合。
+        let reminder_id = uuid::Uuid::now_v7();
         let trigger_version = 20_026_u64;
         let group = notification_group(reminder_id);
         let tag = encode_trigger_tag(trigger_version);
+
+        // 即使系统历史查询或断言失败，也只清理本次随机身份的通知。
+        struct AcceptanceNotification(uuid::Uuid, u64);
+        impl Drop for AcceptanceNotification {
+            fn drop(&mut self) {
+                let _ = WindowsPlatformServices::cancel_notification(self.0, self.1);
+            }
+        }
+        let _cleanup = AcceptanceNotification(reminder_id, trigger_version);
 
         // 按 Windows 官方示例至少提前十秒安排，并留出五秒完成历史持久化。
         WindowsPlatformServices::upsert_notification(
@@ -1376,12 +1397,20 @@ mod tests {
                     == tag
         });
 
-        // 无论断言结果如何，均尽力移除验收产生的通知或残留计划。
-        let _ = history.RemoveGroupWithId(
-            &windows::core::HSTRING::from(&group),
-            &windows::core::HSTRING::from(PRODUCT_IDENTITY.aumid),
-        );
-        let _ = WindowsPlatformServices::cancel_notification(reminder_id, trigger_version);
+        // 走生产取消路径，验证它会移除已投递历史，而不仅仅是未来计划。
+        WindowsPlatformServices::cancel_notification(reminder_id, trigger_version)
+            .expect("取消已投递的验收通知");
+        let remaining = history
+            .GetHistoryWithId(&windows::core::HSTRING::from(PRODUCT_IDENTITY.aumid))
+            .expect("读取取消后的通知历史");
+        let still_present = (0..remaining.Size().expect("读取剩余数量")).any(|index| {
+            let Ok(item) = remaining.GetAt(index) else {
+                return false;
+            };
+            item.Group().is_ok_and(|value| value == group.as_str())
+                && item.Tag().is_ok_and(|value| value == tag.as_str())
+        });
         assert!(found, "到点通知没有进入 QuickNote 的 Windows 通知历史");
+        assert!(!still_present, "生产取消路径遗留了已投递的正文");
     }
 }

@@ -21,16 +21,57 @@ if (-not (Test-Path -LiteralPath $build.Executable)) { throw '找不到 Release 
 $installer = Join-Path $OutputDirectory "QuickNote-$($build.Version)-x64.msi"
 & (Join-Path $PSScriptRoot 'Test-QuickNoteInstaller.ps1') -InstallerPath $installer -OutputDirectory $OutputDirectory -AllowUnsigned
 
-# 独立目录可直接运行；SQLite 数据仍保存在当前用户的 LocalAppData。
-$portable = Join-Path $OutputDirectory "QuickNote-$($build.Version)-x64"
-New-Item -ItemType Directory -Path $portable -Force | Out-Null
-Copy-Item -LiteralPath $build.Executable -Destination (Join-Path $portable 'QuickNote.exe') -Force
-foreach ($document in @('LICENSE', 'PRIVACY.md', 'THIRD_PARTY_NOTICES.md', 'CODE_SIGNING_POLICY.md')) {
-    Copy-Item -LiteralPath (Join-Path $repositoryRoot $document) -Destination $portable -Force
-}
-Copy-Item -LiteralPath (Join-Path $repositoryRoot 'docs\mvp-v0.1.md') -Destination (Join-Path $portable '使用说明.md') -Force
+# 每次从全新暂存目录构建，旧便携目录中的遗留文件绝不进入新交付物。
+$portableName = "QuickNote-$($build.Version)-x64"
+$portable = Join-Path $OutputDirectory $portableName
 $zip = Join-Path $OutputDirectory "QuickNote-$($build.Version)-x64-portable.zip"
-Compress-Archive -LiteralPath $portable -DestinationPath $zip -Force
+$stage = Join-Path $OutputDirectory ('.quicknote-mvp-stage-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $stage | Out-Null
+try {
+    $stagedPortable = Join-Path $stage $portableName
+    $stagedZip = Join-Path $stage 'portable.zip'
+    New-Item -ItemType Directory -Path $stagedPortable | Out-Null
+    Copy-Item -LiteralPath $build.Executable -Destination (Join-Path $stagedPortable 'QuickNote.exe')
+    $documents = @('LICENSE', 'PRIVACY.md', 'THIRD_PARTY_NOTICES.md', 'CODE_SIGNING_POLICY.md')
+    foreach ($document in $documents) {
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot $document) -Destination $stagedPortable
+    }
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'docs\mvp-v0.1.md') -Destination (Join-Path $stagedPortable '使用说明.md')
+    Compress-Archive -LiteralPath $stagedPortable -DestinationPath $stagedZip
+
+    # 逐项验证 ZIP 白名单，防止语音 sidecar、测试文件或旧版本载荷混入。
+    $expected = @(@('QuickNote.exe', '使用说明.md') + $documents | ForEach-Object { "$portableName/$_" })
+    $archive = [IO.Compression.ZipFile]::OpenRead($stagedZip)
+    try {
+        $actual = @($archive.Entries | Where-Object { -not $_.FullName.EndsWith('/') } | ForEach-Object { $_.FullName.Replace('\', '/') })
+        if ($actual.Count -ne $expected.Count -or @(Compare-Object -ReferenceObject $expected -DifferenceObject $actual -CaseSensitive).Count -gt 0) {
+            throw '便携 ZIP 内容与预期文件白名单不一致。'
+        }
+    }
+    finally { $archive.Dispose() }
+
+    # 发布前验证旧产物是输出目录的直属产品目录，且不是指向用户数据的重解析点。
+    if (Test-Path -LiteralPath $portable) {
+        $existing = Get-Item -LiteralPath $portable
+        if (-not $existing.PSIsContainer -or ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            -not [IO.Path]::GetDirectoryName($existing.FullName).Equals($OutputDirectory.TrimEnd('\', '/'), [StringComparison]::OrdinalIgnoreCase) -or
+            $existing.Name -ne $portableName) {
+            throw "拒绝替换未确认的便携目录：$portable"
+        }
+        Remove-Item -LiteralPath $existing.FullName -Recurse -Force
+    }
+    Move-Item -LiteralPath $stagedPortable -Destination $portable
+    Move-Item -LiteralPath $stagedZip -Destination $zip -Force
+}
+finally {
+    # stage 名称由本次随机生成；清理前再次限制到输出目录直属子目录。
+    $resolvedStage = [IO.Path]::GetFullPath($stage)
+    if ([IO.Path]::GetDirectoryName($resolvedStage).Equals($OutputDirectory.TrimEnd('\', '/'), [StringComparison]::OrdinalIgnoreCase) -and
+        [IO.Path]::GetFileName($resolvedStage) -match '^\.quicknote-mvp-stage-[0-9a-f]{32}$' -and
+        -not ((Get-Item -LiteralPath $resolvedStage).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Remove-Item -LiteralPath $resolvedStage -Recurse -Force
+    }
+}
 
 # 清单显式标记未签名，附精确体积和 SHA-256，便于交付后确认文件一致。
 $files = @($installer, $zip, (Join-Path $portable 'QuickNote.exe')) | ForEach-Object {

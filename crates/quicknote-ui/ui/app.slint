@@ -169,6 +169,8 @@ export component MainWindow inherits Window {
     callback backup-requested();
     callback open-data-directory();
     callback open-notices();
+    // 宿主通过事件循环投递外部激活，界面不包含平台消息或线程类型。
+    callback external-activation();
 
     // 窗口管理器尺寸变化只更新状态，不把内容约束反向绑定到顶层宽度。
     changed width => { root.compact-mode = root.width < 720px; }

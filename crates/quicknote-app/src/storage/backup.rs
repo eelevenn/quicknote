@@ -254,20 +254,69 @@ pub(super) fn clear_history(connection: &Connection) -> Result<(), ApplicationEr
 
 /// 管理线程缓存当日状态，避免每次输入都扫描磁盘。
 pub(super) struct BackupMaintenance {
-    pub status: BackupStatus,
+    status: BackupStatus,
+    pub trash_warning: Option<String>,
     day: String,
     retry_after_ms: i64,
     checkpoint_at: std::time::Instant,
 }
 
 impl BackupMaintenance {
-    pub fn new() -> Self {
-        Self {
+    pub fn new(connection: &Connection) -> Self {
+        let mut maintenance = Self {
             status: BackupStatus::default(),
+            trash_warning: None,
             day: String::new(),
             retry_after_ms: 0,
             checkpoint_at: std::time::Instant::now(),
+        };
+        // 启动只轮换已有历史；空库不能抢占首个成功用户写入的每日快照。
+        let history = data_directory(connection).and_then(|directory| {
+            rotate_backups(&directory)?;
+            backup_files(&directory)
+        });
+        match history {
+            Ok(files) => {
+                maintenance.status.last_success_at_ms = files.first().map(|file| file.created_at_ms)
+            }
+            Err(error) => maintenance.record_failure(connection, error),
         }
+        let retry_required = connection.query_row(
+            "SELECT value_json = 'true' FROM maintenance_state WHERE key = 'backup_retry_required'",
+            [], |row| row.get::<_, bool>(0),
+        ).unwrap_or(false);
+        if retry_required {
+            maintenance.after_write(connection, true);
+        }
+        maintenance
+    }
+
+    /// 合并两类维护警告，备份成功不能遮蔽尚未完成的回收站清理。
+    pub fn status(&self) -> BackupStatus {
+        let mut status = self.status.clone();
+        if let Some(warning) = &self.trash_warning {
+            status.warning = Some(match status.warning {
+                Some(backup_warning) => format!("{warning}；{backup_warning}"),
+                None => warning.clone(),
+            });
+        }
+        status
+    }
+
+    fn record_failure(&mut self, connection: &Connection, error: ApplicationError) {
+        let now = timestamp_ms(SystemTime::now());
+        self.day.clear();
+        self.status.warning = Some(format!(
+            "自动备份失败，正文已保存；一小时后或下次启动重试：{error}"
+        ));
+        self.retry_after_ms = now + 3_600_000;
+        // 记录重试意图，不把错误正文写入用户导出；持久化失败仍保留当前会话警告。
+        let _ = connection.execute(
+            "INSERT INTO maintenance_state(key, value_json, updated_at_ms)
+             VALUES ('backup_retry_required', 'true', ?1)
+             ON CONFLICT(key) DO UPDATE SET value_json = 'true', updated_at_ms = excluded.updated_at_ms",
+            [now],
+        );
     }
 
     /// 普通备份失败只记录警告；显式重试或永久清除后可以绕过一小时退避。
@@ -285,12 +334,13 @@ impl BackupMaintenance {
                     warning: None,
                 };
                 self.retry_after_ms = 0;
+                let _ = connection.execute(
+                    "DELETE FROM maintenance_state WHERE key = 'backup_retry_required'",
+                    [],
+                );
             }
             Err(error) => {
-                self.day.clear();
-                self.status.warning =
-                    Some(format!("自动备份失败，正文已保存；一小时后重试：{error}"));
-                self.retry_after_ms = now + 3_600_000;
+                self.record_failure(connection, error);
             }
         }
     }

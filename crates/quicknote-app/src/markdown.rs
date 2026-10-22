@@ -1,6 +1,6 @@
 //! Markdown 解析、消毒预览与单张便签导出。
 
-use crate::{MarkdownLink, MarkdownPreview, NoteDocument};
+use crate::{ApplicationError, MarkdownLink, MarkdownPreview, NoteDocument};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// 把允许的 Markdown 解析成 Slint 可安全展示的纯文本。
@@ -60,21 +60,25 @@ pub(crate) fn render_preview(source: &str) -> MarkdownPreview {
 }
 
 /// 生成 UTF-8/LF front matter，并在其后原样附加 Markdown 正文。
-pub(crate) fn markdown_export(note: &NoteDocument) -> String {
+pub(crate) fn markdown_export(
+    note: &NoteDocument,
+    reminder_at_ms: Option<i64>,
+) -> Result<String, ApplicationError> {
     let mut output = String::new();
     output.push_str("---\nquicknote_export_version: 1\n");
     output.push_str(&format!("id: {}\n", yaml_string(&note.id.to_string())));
     output.push_str(&format!("title: {}\n", yaml_string(&note.title)));
     output.push_str(&format!("lifecycle: {:?}\n", note.lifecycle).to_ascii_lowercase());
     output.push_str(&format!("content_revision: {}\n", note.content_revision));
-    output.push_str(&format!("created_at_ms: {}\n", note.created_at_ms));
-    output.push_str(&format!("updated_at_ms: {}\n", note.updated_at_ms));
-    push_optional_number(&mut output, "archived_at_ms", note.archived_at_ms);
-    push_optional_number(&mut output, "trashed_at_ms", note.trashed_at_ms);
-    push_optional_number(&mut output, "due_at_ms", note.due_at_ms);
+    push_timestamp(&mut output, "created_at", Some(note.created_at_ms))?;
+    push_timestamp(&mut output, "updated_at", Some(note.updated_at_ms))?;
+    push_timestamp(&mut output, "archived_at", note.archived_at_ms)?;
+    push_timestamp(&mut output, "trashed_at", note.trashed_at_ms)?;
+    push_timestamp(&mut output, "due_at", note.due_at_ms)?;
+    push_timestamp(&mut output, "reminder_at", reminder_at_ms)?;
     output.push_str("---\n");
     output.push_str(&note.body);
-    output
+    Ok(output)
 }
 
 fn push_newline(text: &mut String) {
@@ -88,11 +92,21 @@ fn yaml_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
 }
 
-fn push_optional_number(output: &mut String, key: &str, value: Option<i64>) {
+/// 所有领域时间保持同一 UTC 表示；未设置的截止或提醒显式写为 null。
+fn push_timestamp(
+    output: &mut String,
+    key: &str,
+    value: Option<i64>,
+) -> Result<(), ApplicationError> {
     match value {
-        Some(value) => output.push_str(&format!("{key}: {value}\n")),
+        Some(value) => {
+            let timestamp = crate::export::utc_timestamp(value)
+                .map_err(|error| ApplicationError::storage("encode_markdown_time", error))?;
+            output.push_str(&format!("{key}: {}\n", yaml_string(&timestamp)));
+        }
         None => output.push_str(&format!("{key}: null\n")),
     }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -7,26 +7,30 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
+. (Join-Path $PSScriptRoot 'QuickNote-VerificationEnvironment.ps1')
 
-# 只控制本次启动的进程；存在真实用户实例时停止，避免操作用户数据。
-if (Get-Process -Name QuickNote,quicknote-windows -ErrorAction SilentlyContinue) { throw '请先退出正在使用的 QuickNote，再运行隔离验收。' }
+# 文件、注册表和计划提醒均通过保护后，才能启动使用空库的验证进程。
+Assert-QuickNoteVerificationSafe
 $executable = (Resolve-Path -LiteralPath $ExecutablePath).ProviderPath
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repositoryRoot 'artifacts\mvp-smoke' }
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $verificationRoot = Join-Path ([IO.Path]::GetTempPath()) ('quicknote-mvp-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $verificationRoot | Out-Null
-$environment = @{ LOCALAPPDATA = $verificationRoot; APPDATA = $verificationRoot }
+$environment = @{ LOCALAPPDATA = $verificationRoot; APPDATA = $verificationRoot; RUST_BACKTRACE = '1' }
 $process = $null
 $checks = [Collections.Generic.List[string]]::new()
 $success = $false
 $failure = $null
+$registryCopies = @()
 
 # 使用 UIA 值修改和控件动作，兼容没有前台输入权限的自动化会话。
 
 function Start-TestProcess {
     param([string[]]$Arguments = @('--quick-capture'))
-    Start-Process -FilePath $executable -ArgumentList $Arguments -Environment $environment -WindowStyle Hidden -PassThru
+    # 每个进程独立保留异常诊断，避免 GUI 子系统崩溃时只有退出码可查。
+    $errorLog = [IO.Path]::GetFullPath((Join-Path $OutputDirectory ('process-' + [guid]::NewGuid().ToString('N') + '.stderr.log')))
+    Start-Process -FilePath $executable -ArgumentList $Arguments -Environment $environment -WindowStyle Hidden -RedirectStandardError $errorLog -PassThru
 }
 
 function Find-Control {
@@ -62,7 +66,13 @@ function Invoke-Control {
 
 function Activate-Main {
     $secondary = Start-TestProcess -Arguments @('--main')
-    if (-not $secondary.WaitForExit(5000) -or $secondary.ExitCode -ne 0) { throw '单实例激活失败。' }
+    try {
+        if (-not $secondary.WaitForExit(5000) -or $secondary.ExitCode -ne 0) { throw '单实例激活失败。' }
+    }
+    finally {
+        if (-not $secondary.HasExited) { $secondary.Kill(); $secondary.WaitForExit() }
+        $secondary.Dispose()
+    }
     Wait-Control -Name '主页便签 Markdown 原文' | Out-Null
 }
 
@@ -74,16 +84,9 @@ function Assert-Editor {
     return $editor
 }
 
-# 测试会临时注册协议和通知身份，结束时恢复当前用户原有注册。
-$registryPaths = @('HKCU\Software\Classes\quicknote', 'HKCU\Software\Classes\AppUserModelId\eelevenn.QuickNote', 'HKCU\Software\Classes\CLSID\{7E5ACBFA-9501-4F8A-9C85-60C1AE5D17C4}')
-$registryCopies = @()
-foreach ($path in $registryPaths) {
-    $copy = Join-Path $verificationRoot ("registry-$($registryCopies.Count).reg")
-    & reg.exe export $path $copy /y 2>$null | Out-Null
-    $registryCopies += [pscustomobject]@{ Path = $path; Copy = $copy; Existed = ($LASTEXITCODE -eq 0) }
-}
-
 try {
+    # 原注册备份失败时尚未启动应用，因此不会把“读取失败”误当成原本不存在。
+    $registryCopies = @(Save-QuickNoteVerificationRegistry -Directory $verificationRoot)
     $body = 'MVP验收：中文记录与恢复'
     $process = Start-TestProcess
     $editor = Wait-Control -Name '快速记录正文'
@@ -180,11 +183,10 @@ catch {
 }
 finally {
     if ($process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
-    foreach ($entry in $registryCopies) {
-        # 仅删除上面列出的三个产品专属键，然后恢复测试前导出的原始值。
-        if ($registryPaths -notcontains $entry.Path) { throw '拒绝清理非 QuickNote 注册表路径。' }
-        & reg.exe delete $entry.Path /f 2>$null | Out-Null
-        if ($entry.Existed) { & reg.exe import $entry.Copy | Out-Null }
+    $completion = Complete-QuickNoteVerification -Directory $verificationRoot -OutputDirectory $OutputDirectory -RegistryCopies $registryCopies -Succeeded $success
+    if ($completion.Error) {
+        $success = $false
+        $failure = (@($failure, $completion.Error) | Where-Object { $_ }) -join '；'
     }
     # 失败也写入结果，避免仅有部分通过项的报告被当作整条旅程成功。
     [ordered]@{
@@ -195,6 +197,9 @@ finally {
         failure = $failure
         passed = @($checks)
         isolated_data = $verificationRoot
+        isolated_data_retained = $completion.Retained
+        failure_evidence = $completion.EvidenceDirectory
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'journeys.json') -Encoding utf8
+    if ($completion.Error) { throw $completion.Error }
 }
 $checks | ForEach-Object { Write-Output "PASS $_" }

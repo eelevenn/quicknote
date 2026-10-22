@@ -232,6 +232,29 @@ pub struct NoteDocument {
     pub due_at_ms: Option<i64>,
 }
 
+impl NoteDocument {
+    /// 默认导出名由安全标题和 UUID 的随机尾部组成，同名便签也能区分。
+    pub fn markdown_file_name(&self) -> String {
+        let title = self
+            .title
+            .chars()
+            .take(60)
+            .map(|character| {
+                if character.is_control() || "<>:\"/\\|?*".contains(character) {
+                    '_'
+                } else {
+                    character
+                }
+            })
+            .collect::<String>();
+        let title = title.trim().trim_matches('.').trim();
+        let title = if title.is_empty() { "便签" } else { title };
+        // UUIDv7 的前缀是时间；使用随机尾部避免同一分钟新建便签得到相同短名。
+        let id = self.id.simple().to_string();
+        format!("{title}-{}.md", &id[20..])
+    }
+}
+
 /// 主页三个生命周期分区的一致快照。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LibrarySnapshot {
@@ -302,6 +325,53 @@ pub struct ExportSettings {
     pub default_snooze_minutes: u16,
 }
 
+/// JSON 专用文档表示；时间字段与普通 UI 快照分开序列化。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExportNote {
+    /// 稳定便签身份。
+    pub id: Uuid,
+    /// 不改写的 Markdown 正文。
+    pub body: String,
+    /// 正文派生标题。
+    pub title: String,
+    /// 活跃、归档或回收站状态。
+    pub lifecycle: NoteLifecycle,
+    /// 已提交的内容修订。
+    pub content_revision: u64,
+    /// 创建时间，导出为 ISO 8601 UTC。
+    #[serde(rename = "created_at", with = "crate::export::timestamp")]
+    pub created_at_ms: i64,
+    /// 修改时间，导出为 ISO 8601 UTC。
+    #[serde(rename = "updated_at", with = "crate::export::timestamp")]
+    pub updated_at_ms: i64,
+    /// 归档时间，未归档时为 null。
+    #[serde(rename = "archived_at", with = "crate::export::optional_timestamp")]
+    pub archived_at_ms: Option<i64>,
+    /// 回收站时间，未移入时为 null。
+    #[serde(rename = "trashed_at", with = "crate::export::optional_timestamp")]
+    pub trashed_at_ms: Option<i64>,
+    /// 截止时间，未设置时为 null。
+    #[serde(rename = "due_at", with = "crate::export::optional_timestamp")]
+    pub due_at_ms: Option<i64>,
+}
+
+impl From<NoteDocument> for ExportNote {
+    fn from(note: NoteDocument) -> Self {
+        Self {
+            id: note.id,
+            body: note.body,
+            title: note.title,
+            lifecycle: note.lifecycle,
+            content_revision: note.content_revision,
+            created_at_ms: note.created_at_ms,
+            updated_at_ms: note.updated_at_ms,
+            archived_at_ms: note.archived_at_ms,
+            trashed_at_ms: note.trashed_at_ms,
+            due_at_ms: note.due_at_ms,
+        }
+    }
+}
+
 /// JSON 导出中的提醒事实；不包含 outbox 或动作收据。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExportReminder {
@@ -309,7 +379,8 @@ pub struct ExportReminder {
     pub id: Uuid,
     /// 对应便签身份。
     pub note_id: Uuid,
-    /// UTC Unix 毫秒触发时间。
+    /// 触发时间，导出为 ISO 8601 UTC。
+    #[serde(rename = "scheduled_at", with = "crate::export::timestamp")]
     pub scheduled_at_ms: i64,
     /// `scheduled` 或 `missed` 用户语义状态。
     pub status: String,
@@ -322,12 +393,15 @@ pub struct ExportReminder {
 pub struct ExportBundle {
     /// 固定导出格式版本。
     pub format_version: u32,
-    /// 生成快照的 UTC Unix 毫秒。
+    /// 产生此文件的应用版本。
+    pub app_version: String,
+    /// 生成快照的时间，导出为 ISO 8601 UTC。
+    #[serde(rename = "exported_at", with = "crate::export::timestamp")]
     pub exported_at_ms: i64,
     /// 导出时的当前活跃便签。
     pub current_note_id: Option<Uuid>,
     /// 全部未永久清除便签。
-    pub notes: Vec<NoteDocument>,
+    pub notes: Vec<ExportNote>,
     /// 全部领域提醒事实。
     pub reminders: Vec<ExportReminder>,
     /// 用户语义设置。

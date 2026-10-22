@@ -41,7 +41,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic, Set
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use std::sync::{Arc, mpsc};
+    use std::sync::{Arc, OnceLock, mpsc};
     use std::time::Duration;
     use windows_platform::WindowsPlatformServices;
 
@@ -57,10 +57,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     platform.configure_process_identity()?;
     let initial_activation = activation_from_arguments();
     let (activation_sender, activation_receiver) = mpsc::channel();
+    let activation_window = Arc::new(OnceLock::<slint::Weak<MainWindow>>::new());
+    let activation_target = Arc::clone(&activation_window);
     let instance_role = platform.acquire_single_instance(
         initial_activation.clone(),
         Arc::new(move |activation| {
             let _ = activation_sender.send(activation);
+            // 热键/托盘/次实例到达时立即唤醒 UI，避免多等一个 50 ms 轮询周期。
+            if let Some(window) = activation_target.get() {
+                let _ = window.upgrade_in_event_loop(|main| {
+                    // Windows UIA 会重入原生消息栈；零延时任务待本轮读取结束再改变焦点。
+                    let target = main.as_weak();
+                    Timer::single_shot(Duration::ZERO, move || {
+                        if let Some(main) = target.upgrade() {
+                            main.invoke_external_activation();
+                        }
+                    });
+                });
+            }
         }),
     )?;
     let _instance_lease = match instance_role {
@@ -115,6 +129,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Rc::clone(&application),
         platform.clone(),
     );
+    let activation_main = main_window.as_weak();
+    let activation_capture = quick_capture.as_weak();
+    let activation_application = Rc::clone(&application);
+    let activation_platform = platform.clone();
+    main_window.on_external_activation(move || {
+        let (Some(main), Some(capture)) = (activation_main.upgrade(), activation_capture.upgrade())
+        else {
+            return;
+        };
+        while let Ok(activation) = activation_receiver.try_recv() {
+            route_activation(
+                &main,
+                &capture,
+                &activation_application,
+                &activation_platform,
+                activation,
+            );
+        }
+    });
+    let _ = activation_window.set(main_window.as_weak());
     // 关闭窗口后仍需保留可发现的入口；托盘动作通过同一个激活队列路由。
     if let Err(error) = platform.apply(PlatformCommand::SetTrayVisible { visible: true }) {
         main_window.set_action_status(SharedString::from(format!("托盘暂不可用：{error}")));
@@ -126,8 +160,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &platform,
         initial_activation,
     );
+    // 窗口建立前收到的激活仍在队列里，首次进入事件循环前先处理一次。
+    main_window.invoke_external_activation();
 
-    let activation_timer = Timer::default();
+    let feedback_timer = Timer::default();
     let main_weak = main_window.as_weak();
     let capture_weak = quick_capture.as_weak();
     let timer_application = Rc::clone(&application);
@@ -139,19 +175,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let last_timing = Rc::new(RefCell::new(None::<NoteTiming>));
     let timing_cache = Rc::clone(&last_timing);
     let mut capture_was_focused = false;
-    activation_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
+    feedback_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
         let (Some(main), Some(capture)) = (main_weak.upgrade(), capture_weak.upgrade()) else {
             return;
         };
-        while let Ok(activation) = activation_receiver.try_recv() {
-            route_activation(
-                &main,
-                &capture,
-                &timer_application,
-                &timer_platform,
-                activation,
-            );
-        }
         // 点击其他应用时结束快速记录；未成功保存时仍保留正文和窗口。
         let capture_focused = capture.window().is_visible()
             && window_hwnd(capture.window())
@@ -744,9 +771,12 @@ fn wire_settings_callbacks(
             return;
         };
         let result = parse_note_action_id(id.as_str()).and_then(|note_id| {
+            // 先刷新最新标题，再按安全标题和短 UUID 提供默认文件名。
+            app.edit(EditorIntent::Flush)?;
+            let suggested_name = app.note(note_id)?.markdown_file_name();
             let target = windows_platform::choose_export_path(
                 window_hwnd(main.window()),
-                &format!("{note_id}.md"),
+                &suggested_name,
                 false,
             )
             .map_err(|error| quicknote_app::ApplicationError::Platform {
