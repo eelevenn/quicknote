@@ -6,6 +6,7 @@ Push-Location -LiteralPath $repositoryRoot
 
 try {
     cargo windows-release
+    if ($LASTEXITCODE -ne 0) { throw "Windows 构建失败，退出码：$LASTEXITCODE" }
 }
 finally {
     Pop-Location

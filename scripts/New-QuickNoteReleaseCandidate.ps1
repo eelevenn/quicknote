@@ -35,7 +35,8 @@ if ($Version -ne $applicationVersion) {
 
 # 发布候选严格按“构建应用 -> 签 EXE -> 构建 MSI -> 签 MSI -> 验证”排序。
 & (Join-Path $PSScriptRoot 'build-windows.ps1')
-$executable = Join-Path $repositoryRoot 'target\x86_64-pc-windows-msvc\release\quicknote-windows.exe'
+. (Join-Path $PSScriptRoot 'Get-QuickNoteBuild.ps1')
+$executable = (Get-QuickNoteBuild -RepositoryRoot $repositoryRoot).Executable
 & (Join-Path $PSScriptRoot 'Sign-QuickNoteArtifacts.ps1') `
     -Path $executable `
     -CertificateThumbprint $CertificateThumbprint `

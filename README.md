@@ -2,6 +2,8 @@
 
 QuickNote 是面向 Windows 11 的本地优先快速记录应用。生产实现采用 Rust、Slint 与 bundled SQLite；Windows 能力由窄 `PlatformServices` seam 隔离，共享应用模块不依赖 Win32。
 
+第一版 MVP 可直接构建为未签名 MSI 与便携包，不等待签名申请或人工发布审核：运行 `scripts/New-QuickNoteMvp.ps1`，在 `artifacts/mvp` 取得应用、安装器和校验清单。完整操作说明见 [v0.1 MVP 使用说明](docs/mvp-v0.1.md)。
+
 QuickNote 自有源代码采用 [MIT License](LICENSE)。发布和使用前请同时阅读[隐私说明](PRIVACY.md)、[第三方组件说明](THIRD_PARTY_NOTICES.md)与[代码签名政策](CODE_SIGNING_POLICY.md)。项目正在准备申请 SignPath Foundation 免费开源代码签名；获批前的任何构建都不代表已经由 SignPath Foundation 签名。
 
 ## 工程结构
@@ -18,6 +20,10 @@ QuickNote 自有源代码采用 [MIT License](LICENSE)。发布和使用前请�
 截止时间与单一提醒相互独立；未来截止时间在提醒为空时默认安排同刻通知。提醒事实、版本化动作与持久 outbox 在同一 SQLite 事务提交，Windows 计划通知仅在提交后投影。通知提供固化时长的“稍后提醒”和“打开”，支持退出后的通知历史、单实例冷/热激活、错过提醒、休眠恢复收敛、退避重试及 Explorer 计划丢失后的无重复重建。
 
 v0.1.0 MVP 不包含语音输入、模型下载或音频网络调用；范围决定见 [ADR-0004](docs/adr/0004-mvp-excludes-voice-input.md)。
+
+关闭主页只收起到托盘；托盘提供快速记录、主页和显式退出。`Ctrl+N` 新建、`Ctrl+F` 搜索，`Esc` 或点击其他应用收起快速记录。JSON/Markdown 导出由系统保存对话框选择路径并确认覆盖。
+
+日常备份采用 SQLite 一致快照，备份警告和正文保存状态分别显示；损坏恢复会保留原数据库与 WAL/SHM，用户选择有效备份或确认空库后才继续。恢复未完成时，重启不会静默创建空库。永久清除同步清理自动备份历史。
 
 ## 本地验证
 
@@ -44,4 +50,4 @@ cargo test -p quicknote-app --test search_scale -- --ignored --nocapture
 
 Windows 生产身份固定为产品名 `QuickNote`、AUMID `eelevenn.QuickNote`、协议 `quicknote`，数据位于 `%LOCALAPPDATA%\QuickNote\`。
 
-正式候选必须先签所有 PE，再构建并签 MSI；入口为 `scripts/New-QuickNoteReleaseCandidate.ps1`。该命令只接受当前 workspace 版本和有效的当前用户代码签名证书，不提供跳过签名的发布模式。安装器路线、干净系统矩阵及仍需人工完成的门槛见 [Issue 22 发布候选门槛](docs/release-gates/issue-22-release-candidate.md)。
+公开签名发行使用 `scripts/New-QuickNoteReleaseCandidate.ps1`，先签 PE 再构建并签 MSI；它与当前未签名 MVP 交付独立。干净系统矩阵及人工验证记录见 [Issue 22 发布候选门槛](docs/release-gates/issue-22-release-candidate.md)，未执行项目保持未验证，不阻塞本地 MVP 开发和试用。

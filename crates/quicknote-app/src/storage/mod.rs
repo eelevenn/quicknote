@@ -1,6 +1,9 @@
 //! SQLite 单写者与应用命令实现。
 
+mod backup;
 mod migrations;
+
+pub use backup::{BackupInfo, BackupStatus, RecoverySession};
 
 use crate::platform::{GlobalShortcut, NotificationProjectionKey, PlatformCommand};
 use crate::{
@@ -114,6 +117,10 @@ pub(crate) struct SaveRequest {
 }
 
 enum StorageRequest {
+    BackupStatus {
+        retry: bool,
+        respond_to: Sender<Result<BackupStatus, ApplicationError>>,
+    },
     Execute {
         command: Command,
         respond_to: Sender<Result<CommandResult, ApplicationError>>,
@@ -298,6 +305,18 @@ pub(crate) struct StorageClient {
 }
 
 impl StorageClient {
+    /// 读取备份警告或明确重试；仍由唯一存储线程操作活动连接。
+    pub(crate) fn backup_status(&self, retry: bool) -> Result<BackupStatus, ApplicationError> {
+        let (respond_to, response) = mpsc::channel();
+        self.sender
+            .send(StorageRequest::BackupStatus { retry, respond_to })
+            .map_err(writer_disconnected)?;
+        response
+            .recv()
+            .map_err(|error| ApplicationError::WriterUnavailable {
+                message: error.to_string(),
+            })?
+    }
     pub(crate) fn execute(&self, command: Command) -> Result<CommandResult, ApplicationError> {
         let (respond_to, response) = mpsc::channel();
         self.sender
@@ -652,21 +671,38 @@ fn run_writer(
 ) {
     let mut faults = StorageFaultRuntime::new(faults);
     let mut maintenance = MaintenanceSchedule::new(Instant::now());
+    let mut backups = backup::BackupMaintenance::new();
     loop {
-        let request = match receiver.recv_timeout(maintenance.wait_from(Instant::now())) {
+        let request = match receiver.recv_timeout(
+            maintenance
+                .wait_from(Instant::now())
+                .min(Duration::from_secs(30)),
+        ) {
             Ok(request) => request,
             Err(RecvTimeoutError::Timeout) => {
-                maintain_trash_if_due(&mut connection, &mut maintenance);
+                maintain_trash_if_due(&mut connection, &mut maintenance, &mut backups);
+                backups.tick(&connection);
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => break,
         };
+        // total_changes 包含回滚操作；还要确认用户事务成功，才允许占用当日备份。
+        let mut committed_user_write = false;
+        let changes_before = connection.total_changes();
         match request {
+            StorageRequest::BackupStatus { retry, respond_to } => {
+                if retry {
+                    backups.after_write(&connection, true);
+                }
+                let _ = respond_to.send(Ok(backups.status.clone()));
+            }
             StorageRequest::Execute {
                 command,
                 respond_to,
             } => {
-                let _ = respond_to.send(execute_command(&mut connection, command));
+                let result = execute_command(&mut connection, command);
+                committed_user_write = result.is_ok();
+                let _ = respond_to.send(result);
             }
             StorageRequest::Snapshot { respond_to } => {
                 let _ = respond_to.send(read_snapshot(&connection));
@@ -678,6 +714,7 @@ fn run_writer(
                 let result =
                     write_setting(&mut connection, "global_shortcut", &shortcut.to_string())
                         .map(|_| ());
+                committed_user_write = result.is_ok();
                 let _ = respond_to.send(result);
             }
             StorageRequest::PersistStartupEnabled {
@@ -686,6 +723,7 @@ fn run_writer(
             } => {
                 let result =
                     write_setting(&mut connection, "startup_enabled", &enabled).map(|_| ());
+                committed_user_write = result.is_ok();
                 let _ = respond_to.send(result);
             }
             StorageRequest::LoadEditingView { respond_to } => {
@@ -700,7 +738,9 @@ fn run_writer(
                 if !save_delay.is_zero() {
                     thread::sleep(save_delay);
                 }
-                let _ = respond_to.send(save_document(&mut connection, request, fail_after_write));
+                let result = save_document(&mut connection, request, fail_after_write);
+                committed_user_write = result.is_ok();
+                let _ = respond_to.send(result);
             }
             StorageRequest::SwitchCurrent {
                 note_id,
@@ -726,7 +766,13 @@ fn run_writer(
                 let _ = respond_to.send(search_notes(&connection, &query));
             }
             StorageRequest::ApplyNoteAction { action, respond_to } => {
-                let _ = respond_to.send(apply_note_action(&mut connection, action));
+                let permanent = matches!(action, NoteAction::PermanentlyDelete(_));
+                let result = apply_note_action(&mut connection, action);
+                committed_user_write = result.is_ok();
+                if permanent && result.is_ok() {
+                    backups.after_write(&connection, true);
+                }
+                let _ = respond_to.send(result);
             }
             StorageRequest::SetDueAt {
                 note_id,
@@ -734,7 +780,9 @@ fn run_writer(
                 timestamp,
                 respond_to,
             } => {
-                let _ = respond_to.send(set_due_at(&mut connection, note_id, due_at_ms, timestamp));
+                let result = set_due_at(&mut connection, note_id, due_at_ms, timestamp);
+                committed_user_write = result.is_ok();
+                let _ = respond_to.send(result);
             }
             StorageRequest::SetReminder {
                 note_id,
@@ -742,12 +790,9 @@ fn run_writer(
                 timestamp,
                 respond_to,
             } => {
-                let _ = respond_to.send(set_reminder(
-                    &mut connection,
-                    note_id,
-                    scheduled_at_ms,
-                    timestamp,
-                ));
+                let result = set_reminder(&mut connection, note_id, scheduled_at_ms, timestamp);
+                committed_user_write = result.is_ok();
+                let _ = respond_to.send(result);
             }
             StorageRequest::ReadNoteTiming {
                 note_id,
@@ -830,26 +875,46 @@ fn run_writer(
                 let _ = respond_to.send(pending_reminder_projection_count(&connection));
             }
             StorageRequest::MaintainTrash { respond_to } => {
-                let _ = respond_to.send(purge_expired_trash(&mut connection, now_ms()));
+                let result = purge_expired_trash(&mut connection, now_ms());
+                if result.as_ref().is_ok_and(|count| *count > 0) {
+                    backups.after_write(&connection, true);
+                }
+                let _ = respond_to.send(result);
             }
             StorageRequest::ExportBundle { respond_to } => {
                 let _ = respond_to.send(read_export_bundle(&mut connection));
             }
             StorageRequest::Shutdown => break,
         }
-        maintain_trash_if_due(&mut connection, &mut maintenance);
+        if committed_user_write && connection.total_changes() > changes_before {
+            backups.after_write(&connection, false);
+        }
+        backups.tick(&connection);
+        maintain_trash_if_due(&mut connection, &mut maintenance, &mut backups);
     }
     // 正常退出收敛 WAL，失败只影响维护状态，不破坏已提交事务。
-    let _ = connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    if connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .is_ok()
+        && let Ok(directory) = backup::data_directory(&connection)
+    {
+        let _ = std::fs::remove_file(directory.join("session-open"));
+    }
 }
 
-fn maintain_trash_if_due(connection: &mut Connection, maintenance: &mut MaintenanceSchedule) {
+fn maintain_trash_if_due(
+    connection: &mut Connection,
+    maintenance: &mut MaintenanceSchedule,
+    backups: &mut backup::BackupMaintenance,
+) {
     let now = Instant::now();
     if !maintenance.is_due(now) {
         return;
     }
     // 后台维护失败不终止单写者；下一次显式维护仍会返回错误。
-    let _ = purge_expired_trash(connection, now_ms());
+    if purge_expired_trash(connection, now_ms()).is_ok_and(|count| count > 0) {
+        backups.after_write(connection, true);
+    }
     maintenance.mark_completed(now);
 }
 
@@ -1337,6 +1402,8 @@ fn apply_note_action(
             if changed != 1 {
                 return Err(invalid_lifecycle("只有回收站便签可以永久清除"));
             }
+            // 备份移除失败时回滚删除，不能向用户宣告已经永久清除。
+            backup::clear_history(&transaction)?;
         }
     }
 
@@ -2132,6 +2199,9 @@ fn purge_expired_trash(
             params![cutoff],
         )
         .map_err(|error| ApplicationError::storage("purge_expired_trash", error))?;
+    if deleted > 0 {
+        backup::clear_history(&transaction)?;
+    }
     let timestamp_json = serde_json::to_string(&timestamp)
         .map_err(|error| ApplicationError::storage("encode_maintenance_cursor", error))?;
     transaction

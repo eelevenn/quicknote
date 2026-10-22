@@ -66,6 +66,80 @@ const TOAST_ACTIVATOR_CLSID_KEY: PROPERTYKEY = PROPERTYKEY {
 // 快捷方式和当前用户 COM 注册共用稳定 CLSID；通知动作仍统一走 quicknote 协议。
 const TOAST_ACTIVATOR_CLSID: &str = "{7E5ACBFA-9501-4F8A-9C85-60C1AE5D17C4}";
 
+/// 用户明确选择后打开本地目录或随应用提供的许可证文本。
+pub fn open_local_path(path: &Path) -> Result<(), PlatformError> {
+    let path = HSTRING::from(path.as_os_str());
+    let operation = HSTRING::from("open");
+    // SAFETY: 两个宽字符串在同步调用期间保持有效，Shell 负责启动默认处理器。
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(path.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize <= 32 {
+        Err(PlatformError::new(
+            "open_local_path",
+            "无法打开所选目录或文件",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// 使用系统保存对话框选择位置，系统负责覆盖确认；取消不视为错误。
+pub fn choose_export_path(
+    owner: Option<windows::Win32::Foundation::HWND>,
+    suggested_name: &str,
+    json: bool,
+) -> Result<Option<PathBuf>, PlatformError> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{
+        FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, FileSaveDialog, IFileSaveDialog,
+        SIGDN_FILESYSPATH,
+    };
+    use windows::core::w;
+    let choose = || -> windows::core::Result<Option<PathBuf>> {
+        // SAFETY: UI 线程已初始化 STA；COM 对象和宽字符串覆盖整个模态对话框。
+        unsafe {
+            let dialog: IFileSaveDialog =
+                CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)?;
+            dialog.SetOptions(dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT)?;
+            dialog.SetFileName(&HSTRING::from(suggested_name))?;
+            dialog.SetTitle(w!("导出便签 · 明文副本不会随应用内永久清除而删除"))?;
+            let filter = if json {
+                COMDLG_FILTERSPEC {
+                    pszName: w!("JSON 完整备份"),
+                    pszSpec: w!("*.json"),
+                }
+            } else {
+                COMDLG_FILTERSPEC {
+                    pszName: w!("Markdown 便签"),
+                    pszSpec: w!("*.md"),
+                }
+            };
+            dialog.SetFileTypes(&[filter])?;
+            dialog.SetDefaultExtension(if json { w!("json") } else { w!("md") })?;
+            if let Err(error) = dialog.Show(owner) {
+                if error.code().0 == 0x800704C7u32 as i32 {
+                    return Ok(None);
+                }
+                return Err(error);
+            }
+            let path = dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let decoded = path.to_string();
+            CoTaskMemFree(Some(path.0.cast()));
+            Ok(Some(PathBuf::from(decoded?)))
+        }
+    };
+    choose().map_err(|error| PlatformError::new("choose_export_path", error.to_string()))
+}
+
 /// UI 线程持有的 WinRT apartment 租约。
 pub struct WinRtApartment;
 
@@ -94,6 +168,7 @@ pub struct WindowsPlatformServices {
 struct WindowsPlatformState {
     activation_handler: Mutex<Option<ActivationHandler>>,
     hotkey_thread: Mutex<Option<HotkeyThread>>,
+    tray_thread: Mutex<Option<crate::tray::TrayThread>>,
 }
 
 impl WindowsPlatformServices {
@@ -546,9 +621,11 @@ impl WindowsPlatformServices {
                 .set_value(PRODUCT_IDENTITY.product_name, &command)
                 .map_err(|error| PlatformError::new("enable_startup", error.to_string()))
         } else {
-            let run_key = current_user
-                .open_subkey_with_flags(run_key_path, KEY_SET_VALUE)
-                .map_err(|error| PlatformError::new("disable_startup", error.to_string()))?;
+            let run_key = match current_user.open_subkey_with_flags(run_key_path, KEY_SET_VALUE) {
+                Ok(key) => key,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(PlatformError::new("disable_startup", error.to_string())),
+            };
             match run_key.delete_value(PRODUCT_IDENTITY.product_name) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -674,11 +751,26 @@ impl PlatformServices for WindowsPlatformServices {
                 reminder_id,
                 trigger_version,
             } => Self::cancel_notification(reminder_id, trigger_version),
-            // 托盘由后续纵向切片实现。
-            other => Err(PlatformError::new(
-                "apply_platform_command",
-                format!("平台命令尚未接入生产实现：{other:?}"),
-            )),
+            PlatformCommand::SetTrayVisible { visible } => {
+                let mut tray = self
+                    .state
+                    .tray_thread
+                    .lock()
+                    .map_err(|error| PlatformError::new("set_tray", error.to_string()))?;
+                if visible && tray.is_none() {
+                    let handler = self
+                        .state
+                        .activation_handler
+                        .lock()
+                        .map_err(|error| PlatformError::new("set_tray", error.to_string()))?
+                        .clone()
+                        .ok_or_else(|| PlatformError::new("set_tray", "主实例尚未就绪"))?;
+                    *tray = Some(crate::tray::TrayThread::start(handler)?);
+                } else if !visible {
+                    *tray = None;
+                }
+                Ok(())
+            }
         }
     }
 

@@ -15,6 +15,7 @@ $ErrorActionPreference = 'Stop'
 
 # 所有输入都转换为绝对本地路径，避免 WiX 从 WSL UNC 当前目录解析相对路径。
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'Get-QuickNoteBuild.ps1')
 $installerSource = Join-Path $repositoryRoot 'installer\QuickNote.wxs'
 if (-not $Version) {
     # 默认复用 workspace 版本，避免 CI 与应用 About/安装器版本漂移。
@@ -33,7 +34,7 @@ if (-not $SkipApplicationBuild) {
     & (Join-Path $PSScriptRoot 'build-windows.ps1')
 }
 if (-not $ExecutablePath) {
-    $ExecutablePath = Join-Path $repositoryRoot 'target\x86_64-pc-windows-msvc\release\quicknote-windows.exe'
+    $ExecutablePath = (Get-QuickNoteBuild -RepositoryRoot $repositoryRoot).Executable
 }
 $resolvedExecutable = (Resolve-Path -LiteralPath $ExecutablePath).ProviderPath
 
@@ -57,6 +58,10 @@ New-Item -ItemType Directory -Path (Join-Path $stage '.config') -Force | Out-Nul
 Copy-Item -LiteralPath (Join-Path $repositoryRoot '.config\dotnet-tools.json') -Destination (Join-Path $stage '.config\dotnet-tools.json')
 Copy-Item -LiteralPath $installerSource -Destination (Join-Path $stage 'QuickNote.wxs')
 Copy-Item -LiteralPath $resolvedExecutable -Destination (Join-Path $stage 'QuickNote.exe')
+# MSI 与便携包携带同一份许可证和隐私说明。
+foreach ($document in @('LICENSE', 'PRIVACY.md', 'THIRD_PARTY_NOTICES.md', 'CODE_SIGNING_POLICY.md')) {
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot $document) -Destination (Join-Path $stage $document)
+}
 Get-ChildItem -LiteralPath $stage -Recurse -File | Unblock-File
 
 # 使用仓库固定的工具清单，避免开发机全局 WiX 版本改变产物。

@@ -41,16 +41,17 @@ jobs:
       - name: Build production shell
         shell: pwsh
         run: .\scripts\build-windows.ps1
-      - name: Reject dynamic VC Runtime dependencies
+      # 每次成功构建都提供可安装的 MVP，不依赖签名申请或人工审核。
+      - name: Package unsigned MVP and inspect runtime and MSI
         shell: pwsh
-        run: |
-          .\scripts\Test-WindowsRuntimeDependencies.ps1 `
-            -Path '.\target\x86_64-pc-windows-msvc\release\quicknote-windows.exe'
-      - name: Build and inspect unsigned MSI
-        shell: pwsh
-        run: |
-          .\scripts\Build-QuickNoteInstaller.ps1 -SkipApplicationBuild
-          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"$').Matches[0].Groups['version'].Value
-          .\scripts\Test-QuickNoteInstaller.ps1 -InstallerPath ".\artifacts\release-candidate\QuickNote-$version-x64.msi" -AllowUnsigned
+        run: .\scripts\New-QuickNoteMvp.ps1 -SkipApplicationBuild
+      - name: Lint complete workspace
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test complete workspace
         run: cargo test --locked --workspace
+      - name: Upload runnable MVP
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuickNote-unsigned-mvp-x64
+          path: artifacts/mvp/
+          if-no-files-found: error

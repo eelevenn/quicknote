@@ -20,6 +20,7 @@ pub use interface::{
     ReminderCoordinationReason, ReminderSnapshot, ReminderStatus, SaveState, SchemaIdentity,
     SearchResult,
 };
+pub use storage::{BackupInfo, BackupStatus, RecoverySession};
 
 use platform::{GlobalShortcut, PlatformCommand, PlatformServices};
 use std::path::Path;
@@ -45,6 +46,16 @@ struct ReminderFocusState {
 }
 
 impl Application {
+    /// 读取日常备份状态；失败警告与正文保存状态分别呈现。
+    pub fn backup_status(&self) -> Result<BackupStatus, ApplicationError> {
+        self.storage.backup_status(false)
+    }
+
+    /// 刷新最新正文后立即备份，也用于备份失败时的显式重试。
+    pub fn create_backup(&self) -> Result<BackupStatus, ApplicationError> {
+        self.editor.apply(EditorIntent::Flush)?;
+        self.storage.backup_status(true)
+    }
     /// 打开或创建数据库，并在返回前完成所有前向迁移。
     pub fn open(config: ApplicationConfig) -> Result<Self, ApplicationError> {
         Self::open_with_fault(config, storage::MigrationFault::None)
@@ -545,10 +556,23 @@ mod tests {
         let persisted = app.snapshot().expect("读取失败后的数据库事实");
         assert_eq!(persisted.active_note_count, 0);
         assert_eq!(persisted.current_note_id, None);
+        // 回滚也会增加 SQLite total_changes，不能据此消耗当天的首次备份。
+        assert_eq!(app.backup_status().unwrap().last_success_at_ms, None);
 
         app.edit(EditorIntent::RetrySave).expect("请求重试");
         app.edit(EditorIntent::Flush).expect("重试应成功");
         assert_eq!(app.snapshot().expect("读取重试结果").active_note_count, 1);
+        assert!(app.backup_status().unwrap().last_success_at_ms.is_some());
+        let backup_path = std::fs::read_dir(directory.path().join("backups"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "db"))
+            .unwrap();
+        let backup = rusqlite::Connection::open(backup_path).unwrap();
+        let body: String = backup
+            .query_row("SELECT body FROM notes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(body, "首次正文");
     }
 
     #[test]
